@@ -1,10 +1,8 @@
-# remotes::install_github(c("ropensci/tabulizerjars", "ropensci/tabulizer"), INSTALL_opts = "--no-multiarch")
+#remotes::install_github(c("ropensci/tabulizerjars", "ropensci/tabulizer"), INSTALL_opts = "--no-multiarch")
 
-
+# install.packages("BiocManager")
 # Load Packages -----------------------------------------------------------
-pacman::p_load(tidyverse, pdftools, tabulizer, jsonlite, httr, 
-               lubridate)
-
+pacman::p_load(tidyverse, pdftools, jsonlite, httr, lubridate, tabulapdf, MMWRweek)
 
 # Functions ---------------------------------------------------------------
 pull_api = function(endpoint, limit = "5000000") {
@@ -22,7 +20,7 @@ server = "https://nominatim.openstreetmap.org"
 participating_labs = extract_tables('https://www.cdc.gov/surveillance/nrevss/labs/list.pdf', 
                                     guess = F, 
                                     area = list(c(40, 18, 800, 800)), 
-                                    output = "data.frame") |> 
+                                    output = "tibble") |> 
   map(.f = function(x){ 
     x %>% 
       janitor::remove_empty('cols') %>%
@@ -36,59 +34,63 @@ participating_labs = extract_tables('https://www.cdc.gov/surveillance/nrevss/lab
   mutate(out = list(tmaptools::geocode_OSM(institution)))
 
 # Pull Hospitalization Data -----------------------------------------------
-hospitalizations_age <<- read_csv("https://healthdata.gov/resource/g62h-syeh.csv?$limit=500000") %>%
-  select(state, date,
-         starts_with("previous_day_admission_adult_covid_confirmed_"),
-         starts_with("previous_day_admission_pediatric_covid_confirmed_")) %>%
-  pivot_longer(starts_with("previous_day_admission")) %>%
-  filter(!str_detect(name, "_coverage$")) %>%
-  filter(!str_detect(name, "unknown$")) %>%
-  mutate(name = if_else(name == "previous_day_admission_adult_covid_confirmed_80+",
-                        "previous_day_admission_adult_covid_confirmed_80-99",
-                        name)) %>%
-  mutate(name = str_replace(name, "^.*confirmed_(.*)$", "\\1")) %>%
-  gcmdata::splitAgeGroups("name", delim = "[^[:alnum:]]+") %>%
-  drop_na() %>%
-  mutate(value = as.integer(value),
-         date = as.Date(date)) %>%
-  gcmdata::rescaleAgeGroupsValue() %>%
-  gcmdata::expandAgeGroups() %>%
-  gcmdata::tidyAgeGroupColumns() %>%
-  gcmdata::aggregateByAgeGroup(columnsToSummarize = "value",
-                               ageGroupCrosswalk = gcmdata::fetchAgeGroupsCrosswalk("StandardCovidVaccineAgeGroups")) %>%
-  arrange(date) %>%
-  group_by(state, AgeGroupNames) %>%
-  mutate(value = zoo::rollmean(c(rep(NA, 3), value, rep(NA, 3)), 7)) %>%
-  ungroup %>%
-  rename(age_group = AgeGroupNames, data = value)
+# Using old health data endpoint:
+# hospitalizations_age <<- read_csv("https://healthdata.gov/resource/g62h-syeh.csv?$limit=500000") %>%
+#   select(state, date,
+#          starts_with("previous_day_admission_adult_covid_confirmed_"),
+#          starts_with("previous_day_admission_pediatric_covid_confirmed_")) %>%
+#   pivot_longer(starts_with("previous_day_admission")) %>%
+#   filter(!str_detect(name, "_coverage$")) %>%
+#   filter(!str_detect(name, "unknown$")) %>%
+#   mutate(name = if_else(name == "previous_day_admission_adult_covid_confirmed_80+",
+#                         "previous_day_admission_adult_covid_confirmed_80-99",
+#                         name)) %>%
+#   mutate(name = str_replace(name, "^.*confirmed_(.*)$", "\\1"), 
+#          mmwr = MMWRweek::MMWRweek(as.Date(date)), 
+#          mmwr_date = paste0(mmwr$MMWRyear, '-', mmwr$MMWRweek)) #%>%
+  # gcmdata::splitAgeGroups("name", delim = "[^[:alnum:]]+") %>%
+  # drop_na() %>%
+  # mutate(value = as.integer(value),
+  #        date = as.Date(date)) %>%
+  # gcmdata::rescaleAgeGroupsValue() %>%
+  # gcmdata::expandAgeGroups() %>%
+  # gcmdata::tidyAgeGroupColumns() %>%
+  # gcmdata::aggregateByAgeGroup(columnsToSummarize = "value",
+  #                              ageGroupCrosswalk = gcmdata::fetchAgeGroupsCrosswalk("StandardCovidVaccineAgeGroups")) %>%
+  # arrange(date) %>%
+  # group_by(state, AgeGroupNames) %>%
+  # mutate(value = zoo::rollmean(c(rep(NA, 3), value, rep(NA, 3)), 7)) %>%
+  # ungroup %>%
+  # rename(age_group = AgeGroupNames, data = value)
+
+# Using new data.cdc.gov endpoint:
+hospitalizations_age <<- read.csv("https://data.cdc.gov/resource/aemt-mg7g.csv?$limit=500000") %>% 
+  select(date = week_end_date, state = jurisdiction, weekly_actual_days_reporting_any_data, weekly_percent_days_reporting_any_data, 
+         total_admissions_all_covid_confirmed, total_admissions_adult_covid_confirmed, total_admissions_pediatric_covid_confirmed, 
+         avg_admissions_all_covid_confirmed, percent_adult_covid_admissions,
+         num_hospitals_admissions_all_covid_confirmed) %>%
+  mutate(date = as.Date(date), 
+         mmwr = MMWRweek::MMWRweek(date), 
+         mmwr_date = paste0(mmwr$MMWRyear, '-', if_else(nchar(mmwr$MMWRweek) == 1, 
+                                                        paste0("0", mmwr$MMWRweek), 
+                                                        as.character(mmwr$MMWRweek))))
+
+
 
 # National level
 national_hosps <- hospitalizations_age %>%
-  group_by(date) %>%
-  summarise(hospitalizations = sum(data, na.rm = T)) %>%
+  group_by(date, state) %>%
+  summarise(hospitalizations = sum(total_admissions_all_covid_confirmed, na.rm = T)) %>%
   ungroup() %>%
   mutate(date = lubridate::ymd(date))
 
 
 # Pull data from CDC API --------------------------------------------------
-scrape_list = list(NWSS_Concentration = 'https://data.cdc.gov/resource/g653-rqe2.csv', # 
-                   NWSS_Wastewater_Metric = 'https://data.cdc.gov/resource/2ew6-ywp6.csv', # 
+scrape_list = list(NWSS_Wastewater_Metric = 'https://data.cdc.gov/resource/2ew6-ywp6.csv', # 
                    NSSP_ED_Visit_Trajectory = 'https://data.cdc.gov/resource/rdmq-nq56.csv', # 
-                   Test_Positivity_VRP = 'https://data.cdc.gov/resource/seuz-s2cv.csv', # 
-                   #Self_report_public_testing = 'https://data.cdc.gov/resource/275g-9x8h.csv', # 
                    MakeMyTestCount = 'https://data.cdc.gov/resource/i2a4-xk9k.csv', # 
-                   NVSN_Test_Positivity = 'https://data.cdc.gov/resource/kipu-qxy8.csv', # 
-                   COVNET_Hosps = 'https://data.cdc.gov/resource/twtx-bfcw.csv', # 
-                   Monthly_COVNET_Hosps = 'https://data.cdc.gov/resource/cf5u-bm9w.csv', # 
-                   COVNET_Clin_Characteristics = 'https://data.cdc.gov/resource/bigw-pgk2.csv', # 
                    NRVESS_Test_Positivity = 'https://data.cdc.gov/resource/gvsb-yw6g.csv', # 
-                   NRVESS_Var_Props = 'https://data.cdc.gov/resource/jr58-6ysp.csv', # 
-                   NSSP_RVP_Timeseries = 'https://data.cdc.gov/resource/9t9r-e5a3.csv', # 
-                   NSSP_ED_Visit = 'https://data.cdc.gov/resource/7xva-uux8.csv', # 
-                   COVID_case_surveillance = 'https://data.cdc.gov/resource/n8mc-b4w4.csv', # 
-                   RESPNET_Hosp = 'https://data.cdc.gov/resource/kvib-3txy.csv', # 
-                   COV_Hosp = 'https://data.cdc.gov/resource/7dk4-g6vg.csv', # 
-                   COV_Hosp = 'https://data.cdc.gov/resource/39z2-9zu6.csv') # 
+                   NRVESS_Var_Props = 'https://data.cdc.gov/resource/jr58-6ysp.csv')
 
 full_scrape = lapply(scrape_list, function(x) pull_api(x))
 
@@ -127,5 +129,5 @@ full_scrape$MakeMyTestCount %>%
 #             left_join(crosswalk, by = join_by("variable" == "name"))
 # 
 # write_rds(acs_data, 'acs_dat.RDS')
-acs_data <- read_rds('acs_dat.RDS') %>%
-              mutate(race = gsub())
+# acs_data <- read_rds('acs_dat.RDS') %>%
+#               mutate(race = gsub())
