@@ -57,6 +57,41 @@ for(set in seq(1, length(nwss_plots), 4)){
 
 ```
 
+
+### Wastewater Data
+
+```{r}
+full_scrape$NWSS_Wastewater_Metric %>% 
+  select(wwtp_jurisdiction:key_plot_id) %>%
+  distinct() %>%
+  full_join(full_scrape$NWSS_Concentration) %>% head()
+```
+
+```{r}
+nwss <- full_scrape$NWSS_Wastewater_Metric %>% 
+  select(wwtp_jurisdiction:key_plot_id) %>%
+  distinct() %>%
+  full_join(full_scrape$NWSS_Concentration) %>% 
+  select(date, state = wwtp_jurisdiction, sample_location, pcr_conc_lin) %>% 
+  group_by(date, state, sample_location) %>%
+  summarise(avg_detect = mean(pcr_conc_lin, na.rm = T), .groups = "keep")
+
+nwss_plots <- lapply(unique(nwss$state), function(state_nm){
+  ggplot(data = nwss %>% filter(state == state_nm), 
+         aes(x = date, y = avg_detect, group = sample_location, color = sample_location)) + 
+    geom_point() + 
+    labs(title = paste0('State: ', state_nm))
+})
+```
+
+
+```{r}
+for(set in seq(1, length(nwss_plots), 4)){
+  do.call(grid.arrange,nwss_plots[set:min(set+3, length(nwss_plots))])
+}
+
+```
+
 ### NSSP ED Visits
 
 ```{r}
