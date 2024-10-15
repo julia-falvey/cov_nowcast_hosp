@@ -90,6 +90,7 @@ scrape_list = list(NWSS_Wastewater_Metric = 'https://data.cdc.gov/resource/2ew6-
                    NSSP_ED_Visit_Trajectory = 'https://data.cdc.gov/resource/rdmq-nq56.csv', # 
                    MakeMyTestCount = 'https://data.cdc.gov/resource/i2a4-xk9k.csv', # 
                    NRVESS_Test_Positivity = 'https://data.cdc.gov/resource/gvsb-yw6g.csv', # 
+                   NVSN_child_Test_Positivity = 'data.cdc.gov/Public-Health-Surveillance/Percent-Positivity-of-Viral-Detections-Among-Enrol/kipu-qxy8.csv', 
                    NRVESS_Var_Props = 'https://data.cdc.gov/resource/jr58-6ysp.csv')
 
 full_scrape = lapply(scrape_list, function(x) pull_api(x))
