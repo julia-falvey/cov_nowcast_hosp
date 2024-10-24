@@ -66,7 +66,6 @@ for(state_nm in c(state.abb, "DC")){
   data <- hospitalizations_age %>%
     filter(state == state_nm) %>%
     dplyr::select(date, hosp = total_admissions_all_covid_confirmed) %>%
-    filter(date <= '2024-05-01') %>%
     # use box-cox transform on hospital data to avoid negatives in predictions
     # we assume box-cox order 0 (so log() transform, but add 1 to avoid fitting
     # log(0) in our model)
