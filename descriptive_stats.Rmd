@@ -196,3 +196,119 @@ ggplot(data = var_props,
     facet_wrap(usa_or_hhsregion ~ .)
 
 ```
+
+# CCF of data and outcome
+
+## Combine datasets
+
+```{r}
+
+hospitalizations_age <- hospitalizations_age %>%
+  #add HHS region to hospitalizations to map NVSS TP
+  mutate(level = case_when(grepl('CT|ME|MA|NH|RI|VT', state) ~ 'Region 1', 
+                           grepl('NJ|NY|PR|VI', state) ~ 'Region 2', 
+                           grepl('DE|DC|MD|PA|VA|WV', state) ~ 'Region 3',
+                           grepl('AL|FL|GA|KY|MS|NC|SC|TN', state) ~ 'Region 4',
+                           grepl('IL|IN|MI|MN|OH|WI', state) ~ 'Region 5', 
+                           grepl('AR|LA|NM|OK|TX', state) ~ 'Region 6', 
+                           grepl('IA|KS|MO|NE', state) ~ 'Region 7', 
+                           grepl('CO|MT|ND|SD|UT|WY', state) ~ 'Region 8', 
+                           grepl('AZ|CA|HI|NV|AS|GU|MP', state) ~ 'Region 9', 
+                           grepl('AK|ID|OR|WA', state) ~ 'Region 10', 
+                           state == 'USA' ~ 'National',
+                           T ~ 'UNMAPPED'))
+
+nvss_tp <- full_scrape$NRVESS_Test_Positivity %>% 
+  mutate(date = as.Date(mmwrweek_end), 
+         mmwr = MMWRweek::MMWRweek(date), 
+         mmwr_date = paste0(mmwr$MMWRyear, '-', 
+                     if_else(nchar(mmwr$MMWRweek) == 1, paste0("0", 
+                        mmwr$MMWRweek),  as.character(mmwr$MMWRweek)))) %>%
+    select(date, level, percent_pos, number_tested, mmwr_date, posted) %>%
+  mutate(count_pos = percent_pos * number_tested) %>%
+  group_by(date, level) %>%
+  filter(posted== max(posted)) %>%
+  ungroup() %>%
+  distinct()
+
+states <- state.abb %>% bind_cols(state.name) %>%
+  bind_rows(list(`...1` = 'DC', `...2` = 'District of Columbia')) %>%
+  bind_rows(list(`...1` = 'USA', `...2` = 'United States'))
+colnames(states) <- c('state', 'geography')
+nssp <- full_scrape$NSSP_ED_Visit_Trajectory %>% 
+  filter(county == "All") %>% 
+  mutate(date = as.Date(week_end), 
+         mmwr = MMWRweek::MMWRweek(date), 
+         mmwr_date = paste0(mmwr$MMWRyear, '-', 
+                     if_else(nchar(mmwr$MMWRweek) == 1, paste0("0", 
+                        mmwr$MMWRweek),  as.character(mmwr$MMWRweek)))) %>%
+  left_join(states) %>%
+  select(ed_visit_date = date, state, geography, percent_visits_covid, mmwr_date)
+
+nwss <- full_scrape$NWSS_Wastewater_Metric %>% 
+  select(wwtp_jurisdiction:key_plot_id, population_served, date = date_end,
+         detect_prop_15d) %>%
+  distinct() %>%
+  full_join(full_scrape$NWSS_Concentration) %>% 
+  filter(sample_location == 'Treatment plant')  %>% 
+  mutate(date = as.Date(date), 
+         mmwr = MMWRweek::MMWRweek(date), 
+         mmwr_date = paste0(mmwr$MMWRyear, '-', 
+                     if_else(nchar(mmwr$MMWRweek) == 1, paste0("0", 
+                        mmwr$MMWRweek),  as.character(mmwr$MMWRweek)))) %>%
+  select(state = wwtp_jurisdiction, key_plot_id, mmwr_date, pcr_conc_lin, population_served, 
+         detect_prop_15d) %>% 
+  # Frist by site
+  group_by(state, mmwr_date, key_plot_id) %>%
+  summarise(pop_served = mean(population_served, na.rm = T), 
+            avg_detect_prop_15 = mean(detect_prop_15d, na.rm = T),
+            avg_detect = mean(pcr_conc_lin, na.rm = T), .groups = "keep") %>%
+  group_by(state, mmwr_date) %>%
+  # then by state
+  summarise(total_pop = sum(pop_served, na.rm = T), 
+            avg_detect_prop_15 = mean(avg_detect_prop_15, na.rm = T),
+            avg_detect = mean(avg_detect, na.rm = T), .groups = "keep") %>%
+  mutate(detect_per_pop = avg_detect/total_pop) %>%
+  ungroup() %>%
+  rename(geography = state) %>%
+    left_join(states) %>%
+  select(!geography)
+
+joined_df <- hospitalizations_age %>%
+  left_join(nvss_tp, by = c('level', 'mmwr_date', 'date')) %>%
+  left_join(nssp, by = c('state', 'mmwr_date')) %>%
+  left_join(nwss, by = c('state', 'mmwr_date'))
+
+ca_test <- joined_df %>% filter(state == 'CA')
+  
+model <- ccf(ca_test$percent_pos, ca_test$total_admissions_all_covid_confirmed)
+test_positivity_ccf = tibble("acf" = model$acf, "lag" = model$lag) %>%
+  arrange(desc(acf)) %>%
+  slice_head(n = 1) %>% 
+  pull(acf) %>%
+  as.numeric()
+
+model <- ccf(ca_test$count_pos, ca_test$total_admissions_all_covid_confirmed)
+count_test_positivity_ccf = tibble("acf" = model$acf, "lag" = model$lag) %>%
+  arrange(desc(acf)) %>%
+  slice_head(n = 1) %>% 
+  pull(acf) %>%
+  as.numeric()
+
+model <- ccf(ca_test$percent_visits_covid, ca_test$total_admissions_all_covid_confirmed, na.action = na.pass)
+nssp_ccf = tibble("acf" = model$acf, "lag" = model$lag) %>%
+  arrange(desc(acf)) %>%
+  slice_head(n = 1) %>% 
+  pull(acf) %>%
+  as.numeric()
+
+
+model <- ccf(ca_test$number_tested, ca_test$total_admissions_all_covid_confirmed, na.action = na.pass)
+nssp_ccf = tibble("acf" = model$acf, "lag" = model$lag) %>%
+  arrange(desc(acf)) %>%
+  slice_head(n = 1) %>% 
+  pull(acf) %>%
+  as.numeric()
+
+```
+
