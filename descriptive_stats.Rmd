@@ -5,7 +5,7 @@ date: "`r Sys.Date()`"
 ---
 
 ```{r setup, include=FALSE}
-pacman::p_load(plotly, tidyverse, gridExtra)
+pacman::p_load(plotly, tidyverse, gridExtra, RColorBrewer)
 knitr::opts_chunk$set(echo = TRUE)
 if(!(exists("full_scrape"))){
   source("~/Desktop/git/cov_nowcast_hosp/pull_sources.R")
@@ -256,8 +256,10 @@ nwss <- full_scrape$NWSS_Wastewater_Metric %>%
          mmwr_date = paste0(mmwr$MMWRyear, '-', 
                      if_else(nchar(mmwr$MMWRweek) == 1, paste0("0", 
                         mmwr$MMWRweek),  as.character(mmwr$MMWRweek)))) %>%
-  select(state = wwtp_jurisdiction, key_plot_id, mmwr_date, pcr_conc_lin, population_served, 
-         detect_prop_15d) %>% 
+  select(!sample_location_specify) %>%
+  drop_na() %>%
+  select(state = wwtp_jurisdiction, key_plot_id, mmwr_date, pcr_conc_lin,
+         population_served, detect_prop_15d) %>% 
   # Frist by site
   group_by(state, mmwr_date, key_plot_id) %>%
   summarise(pop_served = mean(population_served, na.rm = T), 
@@ -267,8 +269,7 @@ nwss <- full_scrape$NWSS_Wastewater_Metric %>%
   # then by state
   summarise(total_pop = sum(pop_served, na.rm = T), 
             avg_detect_prop_15 = mean(avg_detect_prop_15, na.rm = T),
-            avg_detect = mean(avg_detect, na.rm = T), .groups = "keep") %>%
-  mutate(detect_per_pop = avg_detect/total_pop) %>%
+            avg_detect = mean(avg_detect, na.rm = T)/total_pop, .groups = "keep") %>%
   ungroup() %>%
   rename(geography = state) %>%
     left_join(states) %>%
@@ -277,38 +278,108 @@ nwss <- full_scrape$NWSS_Wastewater_Metric %>%
 joined_df <- hospitalizations_age %>%
   left_join(nvss_tp, by = c('level', 'mmwr_date', 'date')) %>%
   left_join(nssp, by = c('state', 'mmwr_date')) %>%
-  left_join(nwss, by = c('state', 'mmwr_date'))
+  left_join(nwss, by = c('state', 'mmwr_date')) %>%
+  filter(date <= "2024-05-01")
 
-ca_test <- joined_df %>% filter(state == 'CA')
+
+get_ccf <- function(df, state_nm){
+  print(state_nm)
+  filtered_df <- df %>% 
+    filter(state == state_nm) 
+
+  nvss = filtered_df %>%
+    select(state, date, percent_pos, count_pos, 
+           total_admissions_all_covid_confirmed) %>%
+    drop_na()
   
-model <- ccf(ca_test$percent_pos, ca_test$total_admissions_all_covid_confirmed)
-test_positivity_ccf = tibble("acf" = model$acf, "lag" = model$lag) %>%
-  arrange(desc(acf)) %>%
-  slice_head(n = 1) %>% 
-  pull(acf) %>%
-  as.numeric()
+  ed = filtered_df %>%
+    select(state, date, percent_visits_covid, 
+           total_admissions_all_covid_confirmed) %>%
+    drop_na()
+  
+  nwss = filtered_df %>%
+    select(state, date, avg_detect_prop_15, avg_detect, 
+           total_admissions_all_covid_confirmed) %>%
+    drop_na()
 
-model <- ccf(ca_test$count_pos, ca_test$total_admissions_all_covid_confirmed)
-count_test_positivity_ccf = tibble("acf" = model$acf, "lag" = model$lag) %>%
-  arrange(desc(acf)) %>%
-  slice_head(n = 1) %>% 
-  pull(acf) %>%
-  as.numeric()
+  pct_pos = ccf(nvss$percent_pos,
+                nvss$total_admissions_all_covid_confirmed,
+                plot = F)
+  count_pos = ccf(nvss$count_pos,
+                  nvss$total_admissions_all_covid_confirmed, 
+                na.action = na.pass, plot = F)
+  
+  if(state_nm == 'MO'){
+    ed_visit = list(acf = 0, lag = 0)
+  } else {
+      ed_visit = ccf(ed$percent_visits_covid,
+                  ed$total_admissions_all_covid_confirmed, 
+                na.action = na.pass, plot = F)
 
-model <- ccf(ca_test$percent_visits_covid, ca_test$total_admissions_all_covid_confirmed, na.action = na.pass)
-nssp_ccf = tibble("acf" = model$acf, "lag" = model$lag) %>%
-  arrange(desc(acf)) %>%
-  slice_head(n = 1) %>% 
-  pull(acf) %>%
-  as.numeric()
+  }
 
+  if(state_nm == 'ND' | state_nm == "RI" | state_nm == 'DC'){
+    avg_detect_prop_15 = list(acf = 0, lag = 0)
+    avg_detect = list(acf = 0, lag = 0)
+  } else {
+      avg_detect_prop_15 = ccf(nwss$avg_detect_prop_15,
+                  nwss$total_admissions_all_covid_confirmed, 
+                na.action = na.pass, plot = F)
+      avg_detect = ccf(nwss$avg_detect,
+                  nwss$total_admissions_all_covid_confirmed, 
+                na.action = na.pass, plot = F)
+  }
+  tibble("acf" = pct_pos$acf, "lag" = pct_pos$lag, "type" = '% Positive') %>%
+    bind_rows(tibble("acf" = count_pos$acf, "lag" = count_pos$lag,
+                    "type" = 'Count Positive')) %>%
+    bind_rows(tibble("acf" = ed_visit$acf, "lag" = ed_visit$lag,
+                    "type" = 'ED Visit')) %>%
+    bind_rows(tibble("acf" = avg_detect_prop_15$acf, 
+                    "lag" = avg_detect_prop_15$lag,
+                    "type" = 'WW % Detect')) %>%
+    bind_rows(tibble("acf" = avg_detect$acf, 
+                    "lag" = avg_detect$lag,
+                    "type" = 'WW Detect')) %>%
+    arrange(desc(acf)) %>%
+    slice_head(n = 1, by = "type") %>%
+    mutate(state = state_nm)
+}
 
-model <- ccf(ca_test$number_tested, ca_test$total_admissions_all_covid_confirmed, na.action = na.pass)
-nssp_ccf = tibble("acf" = model$acf, "lag" = model$lag) %>%
-  arrange(desc(acf)) %>%
-  slice_head(n = 1) %>% 
-  pull(acf) %>%
-  as.numeric()
-
+state_ccf= lapply(states$state, function(st){
+  if(st == "USA"){
+    return()
+  } else {
+    get_ccf(joined_df, st)
+  }
+}) %>%
+  bind_rows()
 ```
 
+
+```{r}
+ccf_df <- state_ccf %>% 
+  select(state, type, acf) %>%
+  ungroup()  # %>%
+#   pivot_wider(names_from = "type", values_from = "acf") %>%
+#   as.data.frame()
+# 
+# rownames(ccf_df) = ccf_df$state
+# ccf_df <- as.matrix(select(ccf_df, !state))
+# 
+# heatmap(ccf_df, Colv = NA, Rowv = NA, scale="column", 
+#         col= colorRampPalette(brewer.pal(8, "YlGnBu"))(25))
+#         
+p <- ggplot(ccf_df, aes(x = state, y = type, fill = acf)) + 
+  geom_tile() + 
+  scale_fill_distiller("Correlation", palette = "RdYlBu") +
+  theme_minimal() +
+  theme(axis.title.y = element_blank(), 
+        axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 0.45))
+ggsave(paste0("results/CCF Heatmap.pdf"),
+         plot = p, width = 16, height = 10, units = "in", bg = "white", 
+         dpi = "retina")
+
+write.csv(state_ccf, 'ccf.csv')
+write_csv(joined_df %>% select(!mmwr), 'joined_df.csv')
+```
