@@ -133,8 +133,8 @@ prediction_horizons <- c(max_date %m-% months(3), max_date %m-% months(6),
                          max_date %m-% months(9), max_date %m-% months(12)) %>%
   as.character()
 
-full_data <- read_csv('joined_df.csv') %>%
-  filter(date <= "2024-05-01") # Filter out optional reporting period 
+full_data <- read_csv('data/updated_joined_df.csv') # Filter out optional reporting period 
+
 
 fit_prophet_reg_start <- function(cut_date, data, state){
   train_data <- data %>% filter(date < cut_date) %>%
@@ -203,11 +203,12 @@ fit_prophet_ww <- function(cut_date, data, state) {
   first = fit_prophet_reg_start(cut_date, data, state)
   train_data = first$train_data
   model = first$model
-  model = add_regressor(model, 'detect_prop_transformed')
+  model = add_regressor(model, 'raw_pct_transformed')
+  model = add_regressor(model, 'postgrit_pct_transformed')
   model = fit.prophet(model, train_data)
   n = n_distinct(data %>% filter(date >= cut_date) %>% pull(date))
   future <- make_future_dataframe(model, periods = n, freq = "week") %>% 
-    inner_join(data %>% select(ds = date, detect_prop_transformed))
+    inner_join(data %>% select(ds = date, raw_pct_transformed, postgrit_pct_transformed))
   return(fit_prophet_reg_end(model, future, train_data, cut_date, state))
 }
 
@@ -215,12 +216,18 @@ fit_prophet_ww_all <- function(cut_date, data, state) {
   first = fit_prophet_reg_start(cut_date, data, state)
   train_data = first$train_data
   model = first$model
-  model = add_regressor(model, 'detect_transformed')
-  model = add_regressor(model, 'detect_prop_transformed')
+  model = add_regressor(model, 'raw_pct_transformed')
+  model = add_regressor(model, 'postgrit_pct_transformed')
+  model = add_regressor(model, 'microbial_postgrit_transformed')
+  model = add_regressor(model, 'microbial_sludge_transformed')
+  model = add_regressor(model, 'flow_raw_transformed')
+  model = add_regressor(model, 'flow_postgrit_transformed')
   model = fit.prophet(model, train_data)
   n = n_distinct(data %>% filter(date >= cut_date) %>% pull(date))
   future <- make_future_dataframe(model, periods = n, freq = "week") %>% 
-    inner_join(data %>% select(ds = date, detect_transformed, detect_prop_transformed))
+    inner_join(data %>% select(ds = date, raw_pct_transformed, postgrit_pct_transformed,
+                               microbial_postgrit_transformed, microbial_sludge_transformed, 
+                               flow_raw_transformed, flow_postgrit_transformed))
   return(fit_prophet_reg_end(model, future, train_data, cut_date, state))
 }
 
@@ -231,41 +238,92 @@ fit_prophet_regressors <- function(cut_date, data, state) {
   model = add_regressor(model, 'ed_transformed')
   model = add_regressor(model, 'count_transformed')
   model = add_regressor(model, 'percent_transformed')
-  model = add_regressor(model, 'detect_transformed')
-  model = add_regressor(model, 'detect_prop_transformed')
+  model = add_regressor(model, 'raw_pct_transformed')
+  model = add_regressor(model, 'postgrit_pct_transformed')
+  model = add_regressor(model, 'microbial_postgrit_transformed')
+  model = add_regressor(model, 'microbial_sludge_transformed')
+  model = add_regressor(model, 'flow_raw_transformed')
+  model = add_regressor(model, 'flow_postgrit_transformed')
   model = fit.prophet(model, train_data)
   n = n_distinct(data %>% filter(date >= cut_date) %>% pull(date))
   future <- make_future_dataframe(model, periods = n, freq = "week") %>% 
     inner_join(data %>% select(ds = date, ed_transformed, count_transformed, 
-                               percent_transformed, 
-                               detect_transformed, detect_prop_transformed)) #
+                               percent_transformed, raw_pct_transformed, postgrit_pct_transformed,
+                               microbial_postgrit_transformed, microbial_sludge_transformed, 
+                               flow_raw_transformed, flow_postgrit_transformed)) #
   return(fit_prophet_reg_end(model, future, train_data, cut_date, state))
 }
 
 out_tibble <- tribble(~state, ~cut_date, ~rmse_val)
 df_list <- tibble()
+ccf = read_csv('results/ccf.csv') 
 for(state_nm in c(state.abb, "DC")){
   print(state_nm)
+  ccf_state = ccf %>%
+    filter(state == state_nm)
   data <- full_data %>%
-    filter(state == state_nm, 
-           date >= '2022-10-01') %>%
+    filter(state == state_nm,
+           date <= '2024-05-01') %>%
+    janitor::clean_names() %>%
     dplyr::select(date, hosp = total_admissions_all_covid_confirmed, count_pos, 
-                  percent_pos,
-                  percent_visits_covid, avg_detect_prop_15, avg_detect) %>%
+                  percent_pos, percent_visits_covid, 
+                  weighted_raw_ww = avg_detect_prop_weighted_raw_wastewater,
+                  weighted_postgrit_ww = avg_detect_prop_weighted_post_grit_removal,
+                  microbial_postgrit = microbial_post_grit_removal, 
+                  microbial_sludge = microbial_primary_sludge,
+                  flow_postgrit = flow_population_post_grit_removal, 
+                  flow_raw = flow_population_raw_wastewater) %>%
     # use box-cox transform on hospital data to avoid negatives in predictions
     # we assume box-cox order 0 (so log() transform, but add 1 to avoid fitting
     # log(0) in our model)
-    mutate(count_pos = replace_na(count_pos, 0), 
+    mutate(count_pos = lag(replace_na(count_pos, 0), 
+                           n = ccf_state %>% 
+                             filter(type == 'Count Positive') %>%
+                             pull(lag) %>% abs()), 
            count_transformed = log(count_pos+1),
-           percent_pos = replace_na(percent_pos, 0),
+           percent_pos = lag(replace_na(percent_pos, 0), 
+                             n = ccf_state %>% 
+                               filter(type == '% Positive') %>%
+                               pull(lag) %>% abs()),
            percent_transformed = log(percent_pos+1),
-           percent_visits_covid = replace_na(percent_visits_covid, 0),
+           percent_visits_covid = lag(replace_na(percent_visits_covid, 0), 
+                                      n = ccf_state %>% 
+                                        filter(type == 'ED Visit') %>%
+                                        pull(lag) %>% abs()),
            ed_transformed = log(percent_visits_covid + 1),
-           avg_detect_prop_15 = replace_na(avg_detect_prop_15, 0),
-           detect_prop_transformed = log(avg_detect_prop_15+1),
-           avg_detect = replace_na(avg_detect, 0),
-           detect_transformed = log(avg_detect+1),
-           hosp_transformed = log(hosp+1))
+           weighted_raw_ww = lag(replace_na(weighted_raw_ww, 0), 
+                                 n = ccf_state %>% 
+                                   filter(type == 'Weighted WW Raw % Detect') %>%
+                                   pull(lag) %>% abs()),
+           raw_pct_transformed = log(weighted_raw_ww + 1),
+           weighted_postgrit_ww = lag(replace_na(weighted_postgrit_ww, 0), 
+                                      n = ccf_state %>% 
+                                        filter(type == 'Weighted WW Post-Grit Removal % Detect') %>%
+                                        pull(lag) %>% abs()), 
+           postgrit_pct_transformed = log(weighted_postgrit_ww + 1),
+           microbial_postgrit = lag(replace_na(microbial_postgrit, 0), 
+                                    n = ccf_state %>% 
+                                      filter(type == 'Microbial Post-Grit Removal WW Detect') %>%
+                                      pull(lag) %>% abs()), 
+           microbial_postgrit_transformed = log(microbial_postgrit + 1),
+           microbial_sludge = lag(replace_na(microbial_sludge, 0), 
+                                  n = ccf_state %>% 
+                                    filter(type == 'Microbial Primary Sludge WW Detect') %>%
+                                    pull(lag) %>% abs()),
+           microbial_sludge_transformed = log(microbial_sludge + 1),
+           flow_raw = lag(replace_na(flow_raw, 0), 
+                          n = ccf_state %>% 
+                            filter(type == 'Flow-Pop Raw WW Detect') %>%
+                            pull(lag) %>% abs()),
+           flow_raw_transformed = log(flow_raw + 1),
+           flow_postgrit = lag(replace_na(flow_postgrit, 0), 
+                               n = ccf_state %>% 
+                                 filter(type == 'Flow-Pop Post-Grit Removal WW Detect') %>%
+                                 pull(lag) %>% abs()),
+           flow_postgrit_transformed = log(flow_postgrit + 1),
+           hosp_transformed = log(hosp+1)) %>%
+    filter(           date >= '2022-10-01') %>%
+  drop_na()
   for(predict_cut in prediction_horizons){
     ed_reg = fit_prophet_ed(predict_cut, data, state_nm) 
     ed_reg$data <- ed_reg$data %>%
@@ -286,7 +344,7 @@ for(state_nm in c(state.abb, "DC")){
       bind_rows(ed_count_reg$data) %>%
       bind_rows(ww_reg$data) %>%
       bind_rows(ww_all_reg$data) %>%
-      bind_rows(all_reg$data)
+      bind_rows(all_reg$data) 
     out_tibble <- bind_rows(out_tibble, 
                             tibble_row(state = state_nm, 
                                        cut_date = predict_cut, 
@@ -312,8 +370,9 @@ for(state_nm in c(state.abb, "DC")){
 }
 
 
-write_rds(df_list, "results/prophet_regressors.rds")
-
+write_rds(df_list, "results/Multivariate/prophet_regressors_lagged.rds")
+write_rds(out_tibble, "results/Multivariate/prophet_regressors_out_tibble.rds")
+df_list = read_rds("results/Multivariate/prophet_regressors_lagged.rds")
 # Do boxcox and inverse boxcox and move MSE into supplement 
 for(predict_cut in prediction_horizons){
   for(type in unique(df_list$model_type)){

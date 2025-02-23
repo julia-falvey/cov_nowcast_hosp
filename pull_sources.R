@@ -86,11 +86,11 @@ national_hosps <- hospitalizations_age %>%
 
 
 # Pull data from CDC API --------------------------------------------------
-scrape_list = list(NWSS_Wastewater_Metric = 'https://data.cdc.gov/resource/2ew6-ywp6.csv', # 
-                   NWSS_Concentration = 'https://data.cdc.gov/resource/g653-rqe2.csv',
-                   NSSP_ED_Visit_Trajectory = 'https://data.cdc.gov/resource/rdmq-nq56.csv', # 
+scrape_list = list(NWSS_Wastewater_Metric = 'https://data.cdc.gov/resource/2ew6-ywp6.csv?$limit=5000000', # 
+                   NWSS_Concentration = 'https://data.cdc.gov/resource/g653-rqe2.csv?$limit=5000000',
+                   NSSP_ED_Visit_Trajectory = 'https://data.cdc.gov/resource/rdmq-nq56.csv?$limit=5000000', # 
                    #MakeMyTestCount = 'https://data.cdc.gov/resource/i2a4-xk9k.csv', # 
-                   NRVESS_Test_Positivity = 'https://data.cdc.gov/resource/gvsb-yw6g.csv') # 
+                   NRVESS_Test_Positivity = 'https://data.cdc.gov/resource/gvsb-yw6g.csv?$limit=5000000') # 
                    #NVSN_child_Test_Positivity = 'https://data.cdc.gov/Public-Health-Surveillance/Percent-Positivity-of-Viral-Detections-Among-Enrol/kipu-qxy8.csv', 
                    #NRVESS_Var_Props = 'https://data.cdc.gov/resource/jr58-6ysp.csv')
 

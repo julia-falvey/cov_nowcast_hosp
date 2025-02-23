@@ -158,10 +158,6 @@ print(xtable(change_table), include.rownames=FALSE)
 
 
 
-full_data <- read_csv('joined_df.csv') %>%
-  filter(date <= "2024-05-01") 
-
-
 fit_bsts_regressor <- function(cut_date, data, state, n) {
   train_data <- data %>% filter(date < cut_date)
   new_data <- data %>% filter(date >= cut_date) %>% select(!date)
@@ -216,28 +212,75 @@ fit_bsts_regressor <- function(cut_date, data, state, n) {
 
 out_tibble <- tribble(~state, ~cut_date, ~rmse_val)
 df_list <- tibble()
+full_data <- read_csv('data/updated_joined_df.csv')
+ccf = read_csv('results/ccf.csv') 
 for(state_nm in c(state.abb, "DC")){
+  ccf_state = ccf %>%
+    filter(state == state_nm)
   print(state_nm)
   data <- full_data %>%
     filter(state == state_nm, 
-           date >= '2022-10-01') %>%
+           date <= '2024-05-01') %>%
+    janitor::clean_names() %>%
     dplyr::select(date, hosp = total_admissions_all_covid_confirmed, count_pos, 
-                  percent_pos, 
-                  percent_visits_covid, avg_detect_prop_15, avg_detect) %>%
+                  percent_pos, percent_visits_covid, 
+                  weighted_raw_ww = avg_detect_prop_weighted_raw_wastewater,
+                  weighted_postgrit_ww = avg_detect_prop_weighted_post_grit_removal,
+                  microbial_postgrit = microbial_post_grit_removal, 
+                  microbial_sludge = microbial_primary_sludge,
+                  flow_postgrit = flow_population_post_grit_removal, 
+                  flow_raw = flow_population_raw_wastewater) %>%
     # use box-cox transform on hospital data to avoid negatives in predictions
     # we assume box-cox order 0 (so log() transform, but add 1 to avoid fitting
     # log(0) in our model)
-    mutate(count_pos = replace_na(count_pos, 0), 
+    mutate(count_pos = lag(replace_na(count_pos, 0), 
+                           n = ccf_state %>% 
+                             filter(type == 'Count Positive') %>%
+                             pull(lag) %>% abs()), 
            count_transformed = log(count_pos+1),
-           percent_pos = replace_na(percent_pos, 0),
+           percent_pos = lag(replace_na(percent_pos, 0), 
+                             n = ccf_state %>% 
+                               filter(type == '% Positive') %>%
+                               pull(lag) %>% abs()),
            percent_transformed = log(percent_pos+1),
-           percent_visits_covid = replace_na(percent_visits_covid, 0),
+           percent_visits_covid = lag(replace_na(percent_visits_covid, 0), 
+                                      n = ccf_state %>% 
+                                        filter(type == 'ED Visit') %>%
+                                        pull(lag) %>% abs()),
            ed_transformed = log(percent_visits_covid + 1),
-           avg_detect_prop_15 = replace_na(avg_detect_prop_15, 0),
-           detect_prop_transformed = log(avg_detect_prop_15+1),
-           avg_detect = replace_na(avg_detect, 0),
-           detect_transformed = log(avg_detect+1),
-           hosp_transformed = log(hosp+1))
+           weighted_raw_ww = lag(replace_na(weighted_raw_ww, 0), 
+                                 n = ccf_state %>% 
+                                   filter(type == 'Weighted WW Raw % Detect') %>%
+                                   pull(lag) %>% abs()),
+           raw_pct_transformed = log(weighted_raw_ww + 1),
+           weighted_postgrit_ww = lag(replace_na(weighted_postgrit_ww, 0), 
+                                      n = ccf_state %>% 
+                                        filter(type == 'Weighted WW Post-Grit Removal % Detect') %>%
+                                        pull(lag) %>% abs()), 
+           postgrit_pct_transformed = log(weighted_postgrit_ww + 1),
+           microbial_postgrit = lag(replace_na(microbial_postgrit, 0), 
+                                    n = ccf_state %>% 
+                                      filter(type == 'Microbial Post-Grit Removal WW Detect') %>%
+                                      pull(lag) %>% abs()), 
+           microbial_postgrit_transformed = log(microbial_postgrit + 1),
+           microbial_sludge = lag(replace_na(microbial_sludge, 0), 
+                                  n = ccf_state %>% 
+                                    filter(type == 'Microbial Primary Sludge WW Detect') %>%
+                                    pull(lag) %>% abs()),
+           microbial_sludge_transformed = log(microbial_sludge + 1),
+           flow_raw = lag(replace_na(flow_raw, 0), 
+                          n = ccf_state %>% 
+                            filter(type == 'Flow-Pop Raw WW Detect') %>%
+                            pull(lag) %>% abs()),
+           flow_raw_transformed = log(flow_raw + 1),
+           flow_postgrit = lag(replace_na(flow_postgrit, 0), 
+                               n = ccf_state %>% 
+                                 filter(type == 'Flow-Pop Post-Grit Removal WW Detect') %>%
+                                 pull(lag) %>% abs()),
+           flow_postgrit_transformed = log(flow_postgrit + 1),
+           hosp_transformed = log(hosp+1))  %>%
+    filter(           date >= '2022-10-01') %>%
+    drop_na()
   for(predict_cut in prediction_horizons){
     ed_reg = fit_bsts_regressor(predict_cut, data %>%
                               select(date, hosp, hosp_transformed, ed_transformed), 
@@ -253,23 +296,33 @@ for(state_nm in c(state.abb, "DC")){
       mutate(model_type = "ed_count_reg")
     ww_reg = fit_bsts_regressor(predict_cut, data %>%
                               select(date, hosp, hosp_transformed, 
-                                     detect_prop_transformed), 
-                            state_nm, n = 1) 
+                                     raw_pct_transformed, 
+                                     postgrit_pct_transformed), 
+                            state_nm, n = 2) 
     ww_reg$data <- ww_reg$data %>%
       mutate(model_type = "ww_reg")
     ww_all_reg = fit_bsts_regressor(predict_cut, data %>%
                                       select(date, hosp, hosp_transformed, 
-                                             detect_prop_transformed, 
-                                             detect_transformed), 
-                                    state_nm, n = 2)
+                                             raw_pct_transformed, 
+                                             postgrit_pct_transformed, 
+                                             microbial_postgrit_transformed,
+                                             microbial_sludge_transformed, 
+                                             flow_raw_transformed, 
+                                             flow_postgrit_transformed), 
+                                    state_nm, n = 7)
     ww_all_reg$data <- ww_all_reg$data %>%
       mutate(model_type = "ww_all_reg")
     all_reg = fit_bsts_regressor(predict_cut, data %>%
                                        select(date, hosp, hosp_transformed, 
                                               ed_transformed, 
                                               count_transformed,
-                                              detect_prop_transformed, percent_transformed,
-                                              detect_transformed), state_nm, n = 5) 
+                                              percent_transformed,
+                                              raw_pct_transformed, 
+                                              postgrit_pct_transformed, 
+                                              microbial_postgrit_transformed,
+                                              microbial_sludge_transformed, 
+                                              flow_raw_transformed, 
+                                              flow_postgrit_transformed), state_nm, n = 9) 
     all_reg$data <- all_reg$data %>%
       mutate(model_type = "all_reg")
     df_list <- bind_rows(df_list, ed_reg$data) %>%
@@ -302,7 +355,8 @@ for(state_nm in c(state.abb, "DC")){
 }
 
 
-write_rds(df_list, "bsts_regressor_new_data.rds")
+write_rds(df_list, "bsts_lagged_regressors.rds")
+write_rds(out_tibble, "results/bsts_regressors_out_tibble.rds")
 
 for(predict_cut in prediction_horizons){
   for(type in unique(df_list$model_type)){

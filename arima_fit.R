@@ -23,14 +23,22 @@ fit_arima <- function(cut_date, data, fit, seasonal, state, freq, xreg = NULL) {
   train_data <- data %>% filter(date < cut_date)
   ts_dat <- ts(train_data$hosp, frequency = freq)
 
+  if(is.null(xreg)){
+    training_xreg = NULL
+  } else {
+    training_xreg = xreg %>% filter(date < cut_date) %>%
+      select(!date) %>%
+      as.matrix()
+  }
   model <- tryCatch({Arima(ts_dat, order = fit,
                            method = "ML", transform.pars=FALSE,
                            seasonal = seasonal, 
-                           xreg = xreg
+                           xreg = training_xreg
                            )}, 
                     error =  function(err){
-                      mod <- Arima(ts_dat, order = fit,
-                            method = "CSS", seasonal = seasonal)
+                      mod <- Arima(ts_dat, order = fit, transform.pars=FALSE,
+                            seasonal = seasonal,
+                            xreg = training_xreg)
                       return(mod)
                     })
   
@@ -245,82 +253,218 @@ for(st_nm in unique(main_list$state)){
 
 # ARIMAX ------------------------------------------------------------------
 
-arima_fits <- read_rds("results/arima_26_seasonal_fit.rds")
-full_data <- read_csv('joined_df.csv') %>%
-  filter(date <= "2024-05-01") # Filter out optional reporting period 
+arima_fits <- read_rds("results/Univariate/arima_simple_df_list.rds")
+full_data <- read_csv('data/joined_df.csv')
+ccf <- read_csv('results/ccf.csv') 
 
-freq_period = c(26)
-for(freq in freq_period){
-  out_tibble <- tribble(~state, ~cut_date, ~rmse_val)
-  df_list <- tibble()
-  for(state_nm in c(state.abb, "DC")){
-    print(state_nm)
-    data <- full_data %>%
-      filter(state == state_nm, 
-             date >= '2022-10-01') %>%
-      mutate(hosp = log(total_admissions_all_covid_confirmed+1)) %>%
-      dplyr::select(date, hosp = total_admissions_all_covid_confirmed) 
-    ts_dat <- ts(data$hosp, frequency = freq)
-    d = ndiffs(ts_dat)
-    # force seasonal difference
-    D = max(1, nsdiffs(ts_dat, test = "ch", max.D = 2))
-    p = 1:12
-    q = 1:12
-    P = 0:3
-    Q = 0:3
-    full_orders = expand_grid(p, d, q)
-    full_seasonal = bind_rows(expand_grid(P, D, Q))
-    xreg = full_data %>%
-      filter(state == state_nm, 
-             date >= '2022-10-01') %>%
-      select(count_pos) %>% 
-      mutate(across(everything(), ~ replace_na(.x, 0))) %>% # log(replace_na(.x, 0)+1))) %>%
-      as.matrix()
-    model_fit = expand_grid(full_orders, full_seasonal) %>%
-      rowwise() %>%
-      mutate(log_lik = possibly(extract_loglik, otherwise = NA_real_)(p, d, q, P, D, Q, xreg)) %>%
-      ungroup() %>%
-      filter(!is.na(log_lik)) %>%
-      slice_min(order_by=log_lik, n = 25) %>%
-      rowwise() %>%
-      mutate(aic = possibly(extract_aic, otherwise = NA_real_)(p, d, q, P, D, Q, xreg))%>%
-      ungroup() %>%
-      filter(aic == min(aic, na.rm = T)) %>% 
-      ungroup() %>%
-      # if there is a tie somehow, pick one at random
-      slice_sample(n = 1)
-    fit = c(model_fit$p, model_fit$d, model_fit$q)
-    if(length(fit) == 0){
-      fit = c(1,1,1)
-    }
-    seasonal = c(model_fit$P, model_fit$D, model_fit$Q)
-    if(length(seasonal) == 0){
-      seasonal = c(1, 1, 1)
-    }
-    rm(model_fit)
-    gc()
-    for(predict_cut in prediction_horizons){
-      print(predict_cut)
-      rmse_spec = tryCatch({fit_arima(predict_cut, data, fit, seasonal, state_nm, freq, 
-                                      xreg = xreg)}, 
-                           error =  function(err){
-                             fit_arima(predict_cut, data, fit, c(1,0,1), state_nm, freq, 
-                                       xreg = xreg)
-                           })
-      df_list <- bind_rows(df_list, rmse_spec$data %>%
-                             mutate(hosp = hosp - 1, fitted = fitted - 1, 
-                                    `Point Forecast` = `Point Forecast` - 1))
-      out_tibble <- bind_rows(out_tibble, 
-                              tibble_row(state = state_nm, 
-                                         cut_date = predict_cut, 
-                                         rmse_val = rmse_spec$rmse))
-    }
-  }
-  write_rds(df_list, 
-            paste0("results/arimaX_", freq, "_seasonal_fit.rds"))
+
+freq = 26
+out_tibble <- tribble(~state, ~cut_date, ~rmse_val)
+df_list <- tibble()
+
+for(state_nm in c(state.abb, "DC")){
+  print(state_nm)
+  data <- full_data %>%
+    filter(state == state_nm, 
+           date <= '2024-05-01') %>%
+    janitor::clean_names() %>%
+    dplyr::select(date, hosp = total_admissions_all_covid_confirmed, count_pos, 
+                  percent_pos, percent_visits_covid, 
+                  weighted_raw_ww = avg_detect_prop_weighted_raw_wastewater,
+                  weighted_postgrit_ww = avg_detect_prop_weighted_post_grit_removal,
+                  microbial_postgrit = microbial_post_grit_removal, 
+                  microbial_sludge = microbial_primary_sludge,
+                  flow_postgrit = flow_population_post_grit_removal, 
+                  flow_raw = flow_population_raw_wastewater) %>%
+    # use box-cox transform on hospital data to avoid negatives in predictions
+    # we assume box-cox order 0 (so log() transform, but add 1 to avoid fitting
+    # log(0) in our model)
+    mutate(count_pos = lag(replace_na(count_pos, 0), 
+                           n = ccf_state %>% 
+                             filter(type == 'Count Positive') %>%
+                             pull(lag) %>% abs()), 
+           count_transformed = log(count_pos+1),
+           percent_pos = lag(replace_na(percent_pos, 0), 
+                             n = ccf_state %>% 
+                               filter(type == '% Positive') %>%
+                               pull(lag) %>% abs()),
+           percent_transformed = log(percent_pos+1),
+           percent_visits_covid = lag(replace_na(percent_visits_covid, 0), 
+                                      n = ccf_state %>% 
+                                        filter(type == 'ED Visit') %>%
+                                        pull(lag) %>% abs()),
+           ed_transformed = log(percent_visits_covid + 1),
+           weighted_raw_ww = lag(replace_na(weighted_raw_ww, 0), 
+                                 n = ccf_state %>% 
+                                   filter(type == 'Weighted WW Raw % Detect') %>%
+                                   pull(lag) %>% abs()),
+           raw_pct_transformed = log(weighted_raw_ww + 1),
+           weighted_postgrit_ww = lag(replace_na(weighted_postgrit_ww, 0), 
+                                      n = ccf_state %>% 
+                                        filter(type == 'Weighted WW Post-Grit Removal % Detect') %>%
+                                        pull(lag) %>% abs()), 
+           postgrit_pct_transformed = log(weighted_postgrit_ww + 1),
+           microbial_postgrit = lag(replace_na(microbial_postgrit, 0), 
+                                    n = ccf_state %>% 
+                                      filter(type == 'Microbial Post-Grit Removal WW Detect') %>%
+                                      pull(lag) %>% abs()), 
+           microbial_postgrit_transformed = log(microbial_postgrit + 1),
+           microbial_sludge = lag(replace_na(microbial_sludge, 0), 
+                                  n = ccf_state %>% 
+                                    filter(type == 'Microbial Primary Sludge WW Detect') %>%
+                                    pull(lag) %>% abs()),
+           microbial_sludge_transformed = log(microbial_sludge + 1),
+           flow_raw = lag(replace_na(flow_raw, 0), 
+                          n = ccf_state %>% 
+                            filter(type == 'Flow-Pop Raw WW Detect') %>%
+                            pull(lag) %>% abs()),
+           flow_raw_transformed = log(flow_raw + 1),
+           flow_postgrit = lag(replace_na(flow_postgrit, 0), 
+                               n = ccf_state %>% 
+                                 filter(type == 'Flow-Pop Post-Grit Removal WW Detect') %>%
+                                 pull(lag) %>% abs()),
+           flow_postgrit_transformed = log(flow_postgrit + 1),
+           hosp_transformed = log(hosp+1)) %>%
+    filter(           date >= '2022-10-01') %>%
+    drop_na()
+    # use box-cox transform on hospital data to avoid negatives in predictions
+    # we assume box-cox order 0 (so log() transform, but add 1 to avoid fitting
+    # log(0) in our model)
+    # mutate(count_pos = replace_na(count_pos, 0), 
+    #        count_transformed = log(count_pos+1),
+    #        percent_pos = replace_na(percent_pos, 0),
+    #        percent_transformed = log(percent_pos+1),
+    #        percent_visits_covid = replace_na(percent_visits_covid, 0),
+    #        ed_transformed = log(percent_visits_covid + 1),
+    #        avg_detect_prop_15 = replace_na(avg_detect_prop_15, 0),
+    #        detect_prop_transformed = log(avg_detect_prop_15+1),
+    #        avg_detect = replace_na(avg_detect, 0),
+    #        detect_transformed = log(avg_detect+1),
+    #        hosp_transformed = log(hosp+1))
+  fits <- arima_fits %>%
+    filter(state == state_nm) %>%
+    select(fit, seasonal) %>%
+    distinct()
+  fit = unlist(fits$fit)
+  seasonal = unlist(fits$seasonal)
   for(predict_cut in prediction_horizons){
+    print(predict_cut)
+    ed_reg = tryCatch({fit_arima(predict_cut, data, fit, seasonal, state_nm, freq, 
+                                xreg = data %>%
+                                  select(date, ed_transformed))}, 
+      error =  function(err){
+        fit_arima(predict_cut, data, fit, c(1,1,1),  state_nm, freq, 
+                  xreg = data %>%
+                    select(date, ed_transformed))
+      })
+    ed_reg$data <- ed_reg$data %>%
+      mutate(model_type = "ed_reg")
+    ed_count_reg = tryCatch({fit_arima(predict_cut, data, fit, seasonal, state_nm, freq, 
+                                      xreg = data %>%
+                                        select(date, ed_transformed, 
+                                               count_transformed))}, 
+      error =  function(err){
+        fit_arima(predict_cut, data, fit, c(1,1,1), state_nm, freq, 
+                  xreg = data %>%
+                    select(date, ed_transformed, 
+                           count_transformed) )
+      })
+    
+    ed_count_reg$data <- ed_count_reg$data %>%
+      mutate(model_type = "ed_count_reg")
+    ww_reg = tryCatch({fit_arima(predict_cut, data, fit, seasonal, state_nm, freq, 
+                       xreg = data %>%
+                         select(date, detect_prop_transformed))}, 
+      error =  function(err){
+        fit_arima(predict_cut, data, fit, c(1,1,1),  state_nm, freq, 
+                  xreg = data %>%
+                    select(date, detect_prop_transformed))
+      })
+    ww_reg$data <- ww_reg$data %>%
+      mutate(model_type = "ww_reg")
+    ww_all_reg = tryCatch({fit_arima(predict_cut, data, fit, seasonal, state_nm, freq, 
+                           xreg = data %>%
+                             select(date, detect_prop_transformed, 
+                                    detect_transformed))}, 
+      error =  function(err){
+        fit_arima(predict_cut, data, fit, c(1,1,1),  state_nm, freq, 
+                  xreg = data %>%
+                    select(date, detect_prop_transformed, 
+                           detect_transformed))
+      })
+    ww_all_reg$data <- ww_all_reg$data %>%
+      mutate(model_type = "ww_all_reg")
+    all_reg = tryCatch({fit_arima(predict_cut, data, fit, seasonal, state_nm, freq, 
+                        xreg = data %>%
+                          select(date, ed_transformed, 
+                                 count_transformed,
+                                 detect_prop_transformed, percent_transformed,
+                                 detect_transformed))}, 
+      error =  function(err){
+        fit_arima(predict_cut, data, fit, c(1,1,1),  state_nm, freq, 
+                  xreg = data %>%
+                    select(date, ed_transformed, 
+                           count_transformed,
+                           detect_prop_transformed, percent_transformed,
+                           detect_transformed))
+      }) 
+    all_reg$data <- all_reg$data %>%
+      mutate(model_type = "all_reg")
+    all_reg_minus_ww_transform = tryCatch({fit_arima(predict_cut, data, fit, seasonal, state_nm, freq, 
+                                  xreg = data %>%
+                                    select(date, ed_transformed, 
+                                           count_transformed,
+                                           detect_prop_transformed, percent_transformed,
+                                           detect_transformed))}, 
+                       error =  function(err){
+                         fit_arima(predict_cut, data, fit, c(1,1,1), state_nm, freq, 
+                                   xreg = data %>%
+                                     select(date, ed_transformed, 
+                                            count_transformed,
+                                            detect_prop_transformed, percent_transformed,
+                                            detect_transformed))
+                       }) 
+    all_reg_minus_ww_transform$data <- all_reg_minus_ww_transform$data %>%
+      mutate(model_type = "all_reg_minus_ww_transform")
+    df_list <- bind_rows(df_list, ed_reg$data) %>%
+      bind_rows(ed_count_reg$data) %>%
+      bind_rows(ww_reg$data) %>%
+      bind_rows(ww_all_reg$data) %>%
+      bind_rows(all_reg$data) %>%
+      bind_rows(all_reg_minus_ww_transform$data)
+    out_tibble <- bind_rows(out_tibble, 
+                            tibble_row(state = state_nm, 
+                                       cut_date = predict_cut, 
+                                       model_type = 'ed_reg',
+                                       rmse_val = ed_reg$rmse)) %>%
+      bind_rows(tibble_row(state = state_nm, 
+                           cut_date = predict_cut, 
+                           model_type = 'ed_count_reg',
+                           rmse_val = ed_count_reg$rmse)) %>%
+      bind_rows(tibble_row(state = state_nm, 
+                           cut_date = predict_cut, 
+                           model_type = 'ww_reg',
+                           rmse_val = ww_reg$rmse))  %>%
+      bind_rows(tibble_row(state = state_nm, 
+                           cut_date = predict_cut, 
+                           model_type = 'ww_all_reg',
+                           rmse_val = ww_all_reg$rmse))   %>%
+      bind_rows(tibble_row(state = state_nm, 
+                           cut_date = predict_cut, 
+                           model_type = 'all_reg',
+                           rmse_val = all_reg$rmse)) %>%
+      bind_rows(tibble_row(state = state_nm, 
+                           cut_date = predict_cut, 
+                           model_type = 'all_reg_minus_ww_transform',
+                           rmse_val = all_reg_minus_ww_transform$rmse))
+  }
+}
+write_rds(df_list, 
+          paste0("results/arimaX_", freq, "_seasonal_fit.rds"))
+for(predict_cut in prediction_horizons){
+  for(type in unique(df_list$model_type)) {
     p <- df_list %>%
-      select(state:`Point Forecast`) %>%
+      select(state:`Point Forecast`, model_type) %>%
       arrange(state) %>%
       rename(`Fitted Period` = fitted, `Forecast Period` = `Point Forecast`) %>%
       pivot_longer(`Fitted Period`:`Forecast Period`) %>%
@@ -328,7 +472,8 @@ for(freq in freq_period){
       #        hosp = exp(hosp) - 1) %>%
       drop_na() %>%
       filter(cut_date == predict_cut,
-             date >= "2022-07-01") %>%
+             date >= "2022-07-01", 
+             model_type == type) %>%
       ggplot(aes(x = date)) +
       geom_line(aes(y = hosp, color = "Reported \nHospitalizations")) +
       geom_point(aes(y = value, color = name), size = 0.5) +
@@ -336,23 +481,10 @@ for(freq in freq_period){
       scale_color_manual(values = c("#1B9E77", "#7570B3", "#000000")) +
       labs(y = "Hospitalizations", x = "Date", color = "") +
       facet_wrap(state ~ ., ncol =  4, scales = "free_y")
-    ggsave(paste0("results/Arimax seasonal results for ", freq,
+    ggsave(paste0("results/Arimax seasonal results for ", type,
                   " freqency time series at ", predict_cut, " horizon", ".pdf"),
            plot = p, width = 16, height = 10, units = "in", bg = "white",
            dpi = "retina")
   }
-  change_table <- out_tibble %>%
-    group_by(state) %>%
-    arrange(cut_date) %>%
-    mutate(rmse_farthest_timepoint = round(rmse_val[row_number()==1], 1),
-           pct_change = scales::percent((rmse_val - rmse_val[row_number()==1])/rmse_val[row_number()==1],
-                                        accuracy = 2)) %>%
-    dplyr::select(-rmse_val) %>%
-    ungroup() %>%
-    pivot_wider(names_from = "cut_date", values_from = "pct_change") %>%
-    dplyr::select(-`2023-04-27`) %>%
-    rename(`2023-04-27` = rmse_farthest_timepoint)
 
-  write_tsv(change_table,
-            paste0("results/change_table_arimax_", freq, "wk_seasonablity.tsv"))
 }
