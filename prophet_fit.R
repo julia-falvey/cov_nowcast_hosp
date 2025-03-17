@@ -143,7 +143,7 @@ fit_prophet_reg_start <- function(cut_date, data, state){
   model <- prophet(growth = "linear", 
                    changepoint.prior.scale = 0.01,
                    yearly.seasonality = "auto", 
-                   mcmc.samples = 1000)
+                   mcmc.samples = 2000)
   return(list("train_data" = train_data, "model" = model))
 }
 fit_prophet_reg_end <- function(model, future, train_data, cut_date, state){
@@ -160,18 +160,12 @@ fit_prophet_reg_end <- function(model, future, train_data, cut_date, state){
     mutate(hosp = exp(hosp_transformed) - 1, 
            `Point Forecast` = exp(fitted) - 1)
   
-  test_metric <- forecasted %>%
-    ungroup() %>% 
-    mutate(mse = (hosp-`Point Forecast`)^2) %>%
-    summarise(rmse = sqrt(sum(mse))/n()) %>%
-    pull(rmse)
-  
   train_data <- train_data %>%
     bind_rows(forecasted) %>%
     mutate(state = state, cut_date = cut_date, 
            hosp = exp(hosp_transformed - 1)) %>%
     dplyr::select(state, cut_date, date, hosp, everything())
-  return(list(data = train_data, rmse = test_metric))
+  return(train_data)
 }
 # ED visit only
 fit_prophet_ed <- function(cut_date, data, state) {
@@ -192,10 +186,12 @@ fit_prophet_ed_count <- function(cut_date, data, state) {
   model = first$model
   model = add_regressor(model, 'ed_transformed')
   model = add_regressor(model, 'count_transformed')
+  model = add_regressor(model, 'percent_transformed')
   model = fit.prophet(model, train_data)
   n = n_distinct(data %>% filter(date >= cut_date) %>% pull(date))
   future <- make_future_dataframe(model, periods = n, freq = "week") %>% 
-    inner_join(data %>% select(ds = date, ed_transformed, count_transformed))
+    inner_join(data %>% select(ds = date, ed_transformed, count_transformed, 
+                               percent_transformed))
   return(fit_prophet_reg_end(model, future, train_data, cut_date, state))
 }
 
@@ -204,11 +200,10 @@ fit_prophet_ww <- function(cut_date, data, state) {
   train_data = first$train_data
   model = first$model
   model = add_regressor(model, 'raw_pct_transformed')
-  model = add_regressor(model, 'postgrit_pct_transformed')
   model = fit.prophet(model, train_data)
   n = n_distinct(data %>% filter(date >= cut_date) %>% pull(date))
   future <- make_future_dataframe(model, periods = n, freq = "week") %>% 
-    inner_join(data %>% select(ds = date, raw_pct_transformed, postgrit_pct_transformed))
+    inner_join(data %>% select(ds = date, raw_pct_transformed))
   return(fit_prophet_reg_end(model, future, train_data, cut_date, state))
 }
 
@@ -254,7 +249,6 @@ fit_prophet_regressors <- function(cut_date, data, state) {
   return(fit_prophet_reg_end(model, future, train_data, cut_date, state))
 }
 
-out_tibble <- tribble(~state, ~cut_date, ~rmse_val)
 df_list <- tibble()
 ccf = read_csv('results/ccf.csv') 
 for(state_nm in c(state.abb, "DC")){
@@ -325,54 +319,26 @@ for(state_nm in c(state.abb, "DC")){
     filter(           date >= '2022-10-01') %>%
   drop_na()
   for(predict_cut in prediction_horizons){
-    ed_reg = fit_prophet_ed(predict_cut, data, state_nm) 
-    ed_reg$data <- ed_reg$data %>%
-      mutate(model_type = "ed_reg")
-    ed_count_reg = fit_prophet_ed_count(predict_cut, data, state_nm)
-    ed_count_reg$data <- ed_count_reg$data %>%
-      mutate(model_type = "ed_count_reg")
-    ww_reg = fit_prophet_ww(predict_cut, data, state_nm) 
-    ww_reg$data <- ww_reg$data %>%
-      mutate(model_type = "ww_reg")
-    ww_all_reg = fit_prophet_ww_all(predict_cut, data, state_nm)
-    ww_all_reg$data <- ww_all_reg$data %>%
-      mutate(model_type = "ww_all_reg")
-    all_reg = fit_prophet_regressors(predict_cut, data, state_nm) 
-    all_reg$data <- all_reg$data %>%
-      mutate(model_type = "all_reg")
-    df_list <- bind_rows(df_list, ed_reg$data) %>%
-      bind_rows(ed_count_reg$data) %>%
-      bind_rows(ww_reg$data) %>%
-      bind_rows(ww_all_reg$data) %>%
-      bind_rows(all_reg$data) 
-    out_tibble <- bind_rows(out_tibble, 
-                            tibble_row(state = state_nm, 
-                                       cut_date = predict_cut, 
-                                       model_type = 'ed_reg',
-                                       rmse_val = ed_reg$rmse)) %>%
-      bind_rows(tibble_row(state = state_nm, 
-                           cut_date = predict_cut, 
-                           model_type = 'ed_count_reg',
-                           rmse_val = ed_count_reg$rmse)) %>%
-      bind_rows(tibble_row(state = state_nm, 
-                           cut_date = predict_cut, 
-                           model_type = 'ww_reg',
-                           rmse_val = ww_reg$rmse))  %>%
-      bind_rows(tibble_row(state = state_nm, 
-                           cut_date = predict_cut, 
-                           model_type = 'ww_all_reg',
-                           rmse_val = ww_all_reg$rmse))   %>%
-      bind_rows(tibble_row(state = state_nm, 
-                           cut_date = predict_cut, 
-                           model_type = 'all_reg',
-                           rmse_val = all_reg$rmse))
+    ed_reg = fit_prophet_ed(predict_cut, data, state_nm) %>%
+      mutate(model_type = "% ED Visits")
+    ed_count_reg = fit_prophet_ed_count(predict_cut, data, state_nm) %>%
+      mutate(model_type = "% ED Visits and Test Positivity")
+    ww_reg = fit_prophet_ww(predict_cut, data, state_nm) %>%
+      mutate(model_type = "Wastewater % Detection")
+    ww_all_reg = fit_prophet_ww_all(predict_cut, data, state_nm) %>%
+      mutate(model_type = "Wastewater % Detection and Concentrations")
+    all_reg = fit_prophet_regressors(predict_cut, data, state_nm) %>%
+      mutate(model_type = "All Regressors")
+    df_list <- bind_rows(df_list, ed_reg) %>%
+      bind_rows(ed_count_reg) %>%
+      bind_rows(ww_reg) %>%
+      bind_rows(ww_all_reg) %>%
+      bind_rows(all_reg) 
   }
 }
 
 
-write_rds(df_list, "results/Multivariate/prophet_regressors_lagged.rds")
-write_rds(out_tibble, "results/Multivariate/prophet_regressors_out_tibble.rds")
-df_list = read_rds("results/Multivariate/prophet_regressors_lagged.rds")
+write_rds(df_list, "results/Multivariate/prophet_regressors_no_ww_outlier_lagged.rds")
 # Do boxcox and inverse boxcox and move MSE into supplement 
 for(predict_cut in prediction_horizons){
   for(type in unique(df_list$model_type)){
@@ -382,6 +348,7 @@ for(predict_cut in prediction_horizons){
       mutate(fitted = exp(fitted) - 1,
              hosp = exp(hosp_transformed) - 1) %>%
       rename(`Fitted Period` = fitted, `Forecast Period` = `Point Forecast`) %>%
+#      filter(is.na(`Forecast Period`) | `Forecast Period` <= max(hosp) * 100 ) %>%
       pivot_longer(`Fitted Period`:`Forecast Period`) %>%
       drop_na() %>%
       filter(cut_date == as.Date(predict_cut), 
@@ -394,7 +361,7 @@ for(predict_cut in prediction_horizons){
       labs(y = "Hospitalizations", x = "Date", color = "") +
       facet_wrap(state ~ ., ncol =  4, scales = "free_y")
     ggsave(paste0("Prophet Regressor Results for ", as.Date(predict_cut), "_", 
-                  type, ".pdf"), 
+                  gsub("%", "PCT", type, fixed = T), ".pdf"), 
            plot = p, width = 16, height = 10, units = "in", bg = "white", 
            dpi = "retina")
   }

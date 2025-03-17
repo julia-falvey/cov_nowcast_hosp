@@ -108,9 +108,18 @@ nwss_concentration_wide = nwss %>%
   fill(normalization) %>%
   filter(!is.nan(pcr_conc_lin), !is.na(normalization)) %>%
   group_by(state, mmwr_date, location, normalization) %>%
-  summarise(avg_detect = mean(pcr_conc_lin, na.rm = T)) %>%
+  summarise(avg_detect = mean(pcr_conc_lin, na.rm = T))   %>%
   pivot_wider(names_from = normalization, values_from = avg_detect, 
-              values_fill = 0) 
+              values_fill = 0) %>%
+  # Update to handle outliers in concentration reporting that cause issues - 
+  # i.e. one day there's a value that is orders of magnitude higher than all
+  # other days - might be week new plant is coming online or data error, 
+  # but keeping in causes major issues
+  group_by(state, location) %>%
+  mutate(microbial = if_else(microbial >= quantile(microbial, 0.95, na.rm = T) * 10, 
+                             0, microbial), 
+         `flow-population` = if_else(`flow-population` >= quantile(`flow-population`, 0.95, na.rm = T) * 10, 
+                             0, `flow-population`))
 
 nwss_metric_wide <- nwss %>%
   select(state, key_plot_id, mmwr_date, location, population_served, 
@@ -133,7 +142,7 @@ nwss_wide <- nwss_concentration_wide %>%
   ungroup() %>%
   select(!geography) %>%
   filter(!is.na(state)) %>%
-  mutate(across(is.numeric, ~ replace_na(.x, 0))) |>
+  mutate(across(where(is.numeric), ~ replace_na(.x, 0))) |>
   pivot_wider(names_from = location, 
               values_from = microbial:avg_detect_prop_unweighted)
 
@@ -246,9 +255,9 @@ get_ccf <- function(df, state_nm){
     bind_rows(tibble("acf" = microbial_post_grit_removal$acf,
                      "lag" = microbial_post_grit_removal$lag,
                      "type" = 'Microbial Post-Grit Removal WW Detect')) %>%
-    bind_rows(tibble("acf" = microbial_raw_wastewater$acf,
-                     "lag" = microbial_raw_wastewater$lag,
-                     "type" = 'Microbial Raw WW Detect')) %>%
+    # bind_rows(tibble("acf" = microbial_raw_wastewater$acf,
+    #                  "lag" = microbial_raw_wastewater$lag,
+    #                  "type" = 'Microbial Raw WW Detect')) %>%
     bind_rows(tibble("acf" = microbial_primary_sludge$acf,
                      "lag" = microbial_primary_sludge$lag,
                      "type" = 'Microbial Primary Sludge WW Detect')) %>%
@@ -273,9 +282,9 @@ get_ccf <- function(df, state_nm){
     bind_rows(tibble("acf" = avg_detect_prop_unweighted_raw_wastewater$acf,
                      "lag" = avg_detect_prop_unweighted_raw_wastewater$lag,
                      "type" = 'Weighted WW Raw % Detect')) %>%
-    bind_rows(tibble("acf" = avg_detect_prop_weighted_primary_sludge$acf,
-                     "lag" = avg_detect_prop_weighted_primary_sludge$lag,
-                     "type" = 'Weighted WW Primary Sludge % Detect')) %>%
+    # bind_rows(tibble("acf" = avg_detect_prop_weighted_primary_sludge$acf,
+    #                  "lag" = avg_detect_prop_weighted_primary_sludge$lag,
+    #                  "type" = 'Weighted WW Primary Sludge % Detect')) %>%
     # bind_rows(tibble("acf" = avg_detect_prop_weighted_primary_effluent$acf,
     #                  "lag" = avg_detect_prop_weighted_primary_effluent$lag,
     #                  "type" = 'Weighted WW Primary Effluent % Detect')) %>%

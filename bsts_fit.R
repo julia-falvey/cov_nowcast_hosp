@@ -156,9 +156,7 @@ print(xtable(change_table), include.rownames=FALSE)
 
 # With Regressors ---------------------------------------------------------
 
-
-
-fit_bsts_regressor <- function(cut_date, data, state, n) {
+fit_bsts_regressor <- function(cut_date, data, state, n_reg) {
   train_data <- data %>% filter(date < cut_date)
   new_data <- data %>% filter(date >= cut_date) %>% select(!date)
   n = n_distinct(data %>% filter(date >= cut_date) %>% pull(date))
@@ -172,8 +170,8 @@ fit_bsts_regressor <- function(cut_date, data, state, n) {
                  state.specification = ss,
                  data = train_data %>% select(-date, -hosp),
                  # family = 'poisson',
-                 niter = 2000,
-                 expected.model.size = n)
+                 niter = 3000,
+                 expected.model.size = n_reg)
   fitted <- get_yhats(model1) %>% 
     as_tibble(.name_repair = "unique") %>%
     mutate(sim_number = row_number()) %>%
@@ -197,20 +195,13 @@ fit_bsts_regressor <- function(cut_date, data, state, n) {
     bind_rows(forecasted) %>%
     dplyr::select(date, hosp, fitted, `Point Forecast` = forecasted)
   
-  test_metric <- forecasted %>%
-    ungroup() %>% 
-    mutate(mse = (hosp-forecasted)^2) %>%
-    summarise(rmse = sqrt(sum(mse))/n()) %>%
-    pull(rmse)
-  
   train_data <- train_data %>%
     mutate(state = state, cut_date = cut_date) %>%
     dplyr::select(state, cut_date, date, hosp, everything())
-  return(list(data = train_data, rmse = test_metric))
+  return(train_data)
 }
 
 
-out_tibble <- tribble(~state, ~cut_date, ~rmse_val)
 df_list <- tibble()
 full_data <- read_csv('data/updated_joined_df.csv')
 ccf = read_csv('results/ccf.csv') 
@@ -233,10 +224,12 @@ for(state_nm in c(state.abb, "DC")){
     # use box-cox transform on hospital data to avoid negatives in predictions
     # we assume box-cox order 0 (so log() transform, but add 1 to avoid fitting
     # log(0) in our model)
-    mutate(count_pos = lag(replace_na(count_pos, 0), 
+    # also, add random perturbation to all 0 predictors to match approach taken 
+    # with ARIMA to avoid fitting failures 
+      mutate(count_pos = lag(replace_na(count_pos, 0), 
                            n = ccf_state %>% 
                              filter(type == 'Count Positive') %>%
-                             pull(lag) %>% abs()), 
+                             pull(lag) %>% abs()),
            count_transformed = log(count_pos+1),
            percent_pos = lag(replace_na(percent_pos, 0), 
                              n = ccf_state %>% 
@@ -281,37 +274,35 @@ for(state_nm in c(state.abb, "DC")){
            hosp_transformed = log(hosp+1))  %>%
     filter(           date >= '2022-10-01') %>%
     drop_na()
+
   for(predict_cut in prediction_horizons){
+    print(paste0(state_nm, "- ", predict_cut))
     ed_reg = fit_bsts_regressor(predict_cut, data %>%
                               select(date, hosp, hosp_transformed, ed_transformed), 
-                            state_nm, n = 1) 
-    ed_reg$data <- ed_reg$data %>%
-      mutate(model_type = "ed_reg")
+                            state_nm, n_reg = 1)  %>%
+      mutate(model_type = "% ED Visits")
     ed_count_reg = fit_bsts_regressor(predict_cut, data %>%
                                           select(date, hosp, hosp_transformed, 
                                                  ed_transformed, 
-                                                 count_transformed), 
-                                        state_nm, n = 2)
-    ed_count_reg$data <- ed_count_reg$data %>%
-      mutate(model_type = "ed_count_reg")
+                                                 count_transformed, 
+                                                 percent_transformed), 
+                                        state_nm, n_reg = 3) %>%
+      mutate(model_type = "% ED Visits and Test Positivity")
     ww_reg = fit_bsts_regressor(predict_cut, data %>%
-                              select(date, hosp, hosp_transformed, 
-                                     raw_pct_transformed, 
-                                     postgrit_pct_transformed), 
-                            state_nm, n = 2) 
-    ww_reg$data <- ww_reg$data %>%
-      mutate(model_type = "ww_reg")
+                              select(date, hosp, hosp_transformed,
+                                     raw_pct_transformed),
+                            state_nm, n_reg = 1) %>%
+   mutate(model_type = "Wastewater % Detection")
     ww_all_reg = fit_bsts_regressor(predict_cut, data %>%
-                                      select(date, hosp, hosp_transformed, 
-                                             raw_pct_transformed, 
-                                             postgrit_pct_transformed, 
+                                      select(date, hosp, hosp_transformed,
+                                             raw_pct_transformed,
+                                             postgrit_pct_transformed,
                                              microbial_postgrit_transformed,
-                                             microbial_sludge_transformed, 
-                                             flow_raw_transformed, 
-                                             flow_postgrit_transformed), 
-                                    state_nm, n = 7)
-    ww_all_reg$data <- ww_all_reg$data %>%
-      mutate(model_type = "ww_all_reg")
+                                             microbial_sludge_transformed,
+                                             flow_raw_transformed,
+                                             flow_postgrit_transformed),
+                                    state_nm, n_reg = 6) %>%
+      mutate(model_type = "Wastewater % Detection and Concentrations")
     all_reg = fit_bsts_regressor(predict_cut, data %>%
                                        select(date, hosp, hosp_transformed, 
                                               ed_transformed, 
@@ -322,41 +313,19 @@ for(state_nm in c(state.abb, "DC")){
                                               microbial_postgrit_transformed,
                                               microbial_sludge_transformed, 
                                               flow_raw_transformed, 
-                                              flow_postgrit_transformed), state_nm, n = 9) 
-    all_reg$data <- all_reg$data %>%
-      mutate(model_type = "all_reg")
-    df_list <- bind_rows(df_list, ed_reg$data) %>%
-      bind_rows(ed_count_reg$data) %>%
-      bind_rows(ww_reg$data) %>%
-      bind_rows(ww_all_reg$data) %>%
-      bind_rows(all_reg$data)
-    out_tibble <- bind_rows(out_tibble, 
-                            tibble_row(state = state_nm, 
-                                       cut_date = predict_cut, 
-                                       model_type = 'ed_reg',
-                                       rmse_val = ed_reg$rmse)) %>%
-      bind_rows(tibble_row(state = state_nm, 
-                           cut_date = predict_cut, 
-                           model_type = 'ed_count_reg',
-                           rmse_val = ed_count_reg$rmse)) %>%
-      bind_rows(tibble_row(state = state_nm, 
-                           cut_date = predict_cut, 
-                           model_type = 'ww_reg',
-                           rmse_val = ww_reg$rmse))  %>%
-      bind_rows(tibble_row(state = state_nm, 
-                           cut_date = predict_cut, 
-                           model_type = 'ww_all_reg',
-                           rmse_val = ww_all_reg$rmse))   %>%
-      bind_rows(tibble_row(state = state_nm, 
-                           cut_date = predict_cut, 
-                           model_type = 'all_reg',
-                           rmse_val = all_reg$rmse))
+                                              flow_postgrit_transformed), state_nm,
+                                 n_reg = 9)  %>%
+      mutate(model_type = "All Regressors")
+    df_list <- bind_rows(df_list, ed_reg) %>%
+      bind_rows(ed_count_reg) %>%
+      bind_rows(ww_reg) %>%
+      bind_rows(ww_all_reg) %>%
+      bind_rows(all_reg)
   }
 }
 
 
-write_rds(df_list, "bsts_lagged_regressors.rds")
-write_rds(out_tibble, "results/bsts_regressors_out_tibble.rds")
+write_rds(df_list, "results/Multivariate/bsts_lagged_regressors_no_ww_outlier_model.rds")
 
 for(predict_cut in prediction_horizons){
   for(type in unique(df_list$model_type)){
@@ -375,9 +344,9 @@ for(predict_cut in prediction_horizons){
       scale_color_manual(values = c("#1B9E77", "#7570B3", "#000000")) + 
       labs(y = "Hospitalizations", x = "Date", color = "") +
       facet_wrap(state ~ ., ncol =  4, scales = "free_y")
-    
-    ggsave(paste0("BSTS Regressor Results for ", as.Date(predict_cut), "_", 
-                  type, ".pdf"), 
+        
+    ggsave(paste0("results/Multivariate/Multivariate Plots/BSTS Regressor Results for ", as.Date(predict_cut), "_", 
+                  gsub("%", "PCT", type, fixed = T), ".pdf"), 
            plot = p, width = 16, height = 10, units = "in", bg = "white", 
            dpi = "retina")
   }
