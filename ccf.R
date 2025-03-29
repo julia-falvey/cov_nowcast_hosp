@@ -75,18 +75,18 @@ nwss_metric <-  read_csv('data/NWSS_Wastewater_Metric.csv') %>%
   arrange(reporting_jurisdiction, key_plot_id, mmwr_date) %>%
   tidyr::fill(., detect_prop_15d)
 
-nwss_concentration <- read_csv('data/NWSS_Concentration.csv') %>% 
-  filter(date <= '2024-05-01', 
-         date >= '2022-08-01') %>%
-  mutate(date = as.Date(date), 
-         mmwr = MMWRweek::MMWRweek(date), 
-         mmwr_date = paste0(mmwr$MMWRyear, '-', 
-                            if_else(nchar(mmwr$MMWRweek) == 1, paste0("0", 
-                        mmwr$MMWRweek),  as.character(mmwr$MMWRweek)))) %>%
-  group_by(key_plot_id, normalization, mmwr_date) %>%
-  summarise(pcr_conc_lin = sum(pcr_conc_lin, na.rm = T))
-  
-nwss <- full_join(nwss_metric, nwss_concentration) %>%
+# nwss_concentration <- read_csv('data/NWSS_Concentration.csv') %>% 
+#   filter(date <= '2024-05-01', 
+#          date >= '2022-08-01') %>%
+#   mutate(date = as.Date(date), 
+#          mmwr = MMWRweek::MMWRweek(date), 
+#          mmwr_date = paste0(mmwr$MMWRyear, '-', 
+#                             if_else(nchar(mmwr$MMWRweek) == 1, paste0("0", 
+#                         mmwr$MMWRweek),  as.character(mmwr$MMWRweek)))) %>%
+#   group_by(key_plot_id, normalization, mmwr_date) %>%
+#   summarise(pcr_conc_lin = sum(pcr_conc_lin, na.rm = T))
+#   
+nwss <- nwss_metric %>% #full_join(nwss_metric, nwss_concentration) %>%
   filter(sample_location == 'Treatment plant')  %>%
   mutate(location = gsub("90_|89_", "",
                          str_split_i(key_plot_id, "Treatment plant_", 2)))
@@ -100,26 +100,26 @@ nwss_dates <- cross_join(states,
 nwss <- nwss %>%
   ungroup() %>%
   select(state = reporting_jurisdiction, key_plot_id, mmwr_date, location, 
-         pcr_conc_lin, population_served, normalization, detect_prop_15d) 
+         population_served, detect_prop_15d) # pcr_conc_lin, normalization,
 
-nwss_concentration_wide = nwss %>% 
-  select(state, key_plot_id, mmwr_date, location, normalization, pcr_conc_lin) %>%
-  group_by(state, key_plot_id, location) %>%
-  fill(normalization) %>%
-  filter(!is.nan(pcr_conc_lin), !is.na(normalization)) %>%
-  group_by(state, mmwr_date, location, normalization) %>%
-  summarise(avg_detect = mean(pcr_conc_lin, na.rm = T))   %>%
-  pivot_wider(names_from = normalization, values_from = avg_detect, 
-              values_fill = 0) %>%
-  # Update to handle outliers in concentration reporting that cause issues - 
-  # i.e. one day there's a value that is orders of magnitude higher than all
-  # other days - might be week new plant is coming online or data error, 
-  # but keeping in causes major issues
-  group_by(state, location) %>%
-  mutate(microbial = if_else(microbial >= quantile(microbial, 0.95, na.rm = T) * 10, 
-                             0, microbial), 
-         `flow-population` = if_else(`flow-population` >= quantile(`flow-population`, 0.95, na.rm = T) * 10, 
-                             0, `flow-population`))
+# nwss_concentration_wide = nwss %>% 
+#   select(state, key_plot_id, mmwr_date, location, normalization, pcr_conc_lin) %>%
+#   group_by(state, key_plot_id, location) %>%
+#   fill(normalization) %>%
+#   filter(!is.nan(pcr_conc_lin), !is.na(normalization)) %>%
+#   group_by(state, mmwr_date, location, normalization) %>%
+#   summarise(avg_detect = mean(pcr_conc_lin, na.rm = T))   %>%
+#   pivot_wider(names_from = normalization, values_from = avg_detect, 
+#               values_fill = 0) %>%
+#   # Update to handle outliers in concentration reporting that cause issues - 
+#   # i.e. one day there's a value that is orders of magnitude higher than all
+#   # other days - might be week new plant is coming online or data error, 
+#   # but keeping in causes major issues
+#   group_by(state, location) %>%
+#   mutate(microbial = if_else(microbial >= quantile(microbial, 0.95, na.rm = T) * 10, 
+#                              0, microbial), 
+#          `flow-population` = if_else(`flow-population` >= quantile(`flow-population`, 0.95, na.rm = T) * 10, 
+#                              0, `flow-population`))
 
 nwss_metric_wide <- nwss %>%
   select(state, key_plot_id, mmwr_date, location, population_served, 
@@ -132,19 +132,19 @@ nwss_metric_wide <- nwss %>%
             avg_detect_prop_unweighted = mean(detect_prop_15d,  na.rm = T)) %>%
   select(!total_pop)
 
-nwss_wide <- nwss_concentration_wide %>%
-  full_join(nwss_metric_wide) %>% 
+nwss_wide <- nwss_metric_wide %>% # nwss_concentration_wide %>%
+ # full_join(nwss_metric_wide) %>% 
   ungroup() %>%
   rename(geography = state) %>%
   full_join(nwss_dates) %>%
   group_by(state, location) %>%
-  fill(microbial:avg_detect_prop_unweighted, .direction = "down") %>%
+  fill(avg_detect_prop_weighted:avg_detect_prop_unweighted, .direction = "down") %>% #microbial
   ungroup() %>%
   select(!geography) %>%
   filter(!is.na(state)) %>%
-  mutate(across(where(is.numeric), ~ replace_na(.x, 0))) |>
+  mutate(across(where(is.numeric), ~ replace_na(.x, 0)/100)) |>
   pivot_wider(names_from = location, 
-              values_from = microbial:avg_detect_prop_unweighted)
+              values_from = avg_detect_prop_weighted:avg_detect_prop_unweighted) #microbial
 
 joined_df <- hospitalizations_age %>%
   left_join(nvss_tp, by = c('level', 'mmwr_date', 'date')) %>%
@@ -152,7 +152,7 @@ joined_df <- hospitalizations_age %>%
   left_join(nwss_wide, by = c('state', 'mmwr_date')) %>%
   filter(date <= "2024-05-01")
 
-write_csv(joined_df, "data/full_df_nwss_fixed.csv")
+# write_csv(joined_df, "data/full_df_nwss_fixed.csv")
 
 get_ccf <- function(df, state_nm){
   print(state_nm)
@@ -175,7 +175,7 @@ get_ccf <- function(df, state_nm){
   
   
   nwss = filtered_df %>%
-    select(state, date, `microbial_post grit removal`:`avg_detect_prop_unweighted_primary effluent`,
+    select(state, date, `avg_detect_prop_weighted_post grit removal`:`avg_detect_prop_unweighted_primary effluent`, #`microbial_post grit removal`
            total_admissions_all_covid_confirmed) %>%
     drop_na()
   
@@ -188,37 +188,37 @@ get_ccf <- function(df, state_nm){
                   lag.max = 5,
                   na.action = na.pass, plot = F)
   
-   ed_visit = ccf(ed$percent_visits_covid,
+  ed_visit = ccf(ed$percent_visits_covid,
                    ed$total_admissions_all_covid_confirmed, lag.max = 5,
                    na.action = na.pass, plot = F)
 
 
-    microbial_post_grit_removal = ccf(nwss$`microbial_post grit removal`,
-                             nwss$total_admissions_all_covid_confirmed, lag.max = 5,
-                             na.action = na.pass, plot = F)
-    microbial_raw_wastewater = ccf(nwss$`microbial_raw wastewater`,
-                                      nwss$total_admissions_all_covid_confirmed, lag.max = 5,
-                                      na.action = na.pass, plot = F)
-    microbial_primary_sludge = ccf(nwss$`microbial_primary sludge`,
-                                   nwss$total_admissions_all_covid_confirmed, lag.max = 5,
-                                   na.action = na.pass, plot = F)
-    microbial_primary_effluent = ccf(nwss$`microbial_primary effluent`,
-                                   nwss$total_admissions_all_covid_confirmed, lag.max = 5,
-                                   na.action = na.pass, plot = F)
-    
-    flow_population_post_grit_removal = ccf(nwss$`flow-population_post grit removal`,
-                                      nwss$total_admissions_all_covid_confirmed, lag.max = 5,
-                                      na.action = na.pass, plot = F)
-    flow_population_raw_wastewater = ccf(nwss$`flow-population_raw wastewater`,
-                                   nwss$total_admissions_all_covid_confirmed, lag.max = 5,
-                                   na.action = na.pass, plot = F)
-    flow_population_primary_sludge = ccf(nwss$`flow-population_primary sludge`,
-                                   nwss$total_admissions_all_covid_confirmed, lag.max = 5,
-                                   na.action = na.pass, plot = F)
-    flow_population_primary_effluent = ccf(nwss$`flow-population_primary effluent`,
-                                     nwss$total_admissions_all_covid_confirmed, lag.max = 5,
-                                     na.action = na.pass, plot = F)
-    
+    # microbial_post_grit_removal = ccf(nwss$`microbial_post grit removal`,
+    #                          nwss$total_admissions_all_covid_confirmed, lag.max = 5,
+    #                          na.action = na.pass, plot = F)
+    # microbial_raw_wastewater = ccf(nwss$`microbial_raw wastewater`,
+    #                                   nwss$total_admissions_all_covid_confirmed, lag.max = 5,
+    #                                   na.action = na.pass, plot = F)
+    # microbial_primary_sludge = ccf(nwss$`microbial_primary sludge`,
+    #                                nwss$total_admissions_all_covid_confirmed, lag.max = 5,
+    #                                na.action = na.pass, plot = F)
+    # microbial_primary_effluent = ccf(nwss$`microbial_primary effluent`,
+    #                                nwss$total_admissions_all_covid_confirmed, lag.max = 5,
+    #                                na.action = na.pass, plot = F)
+    # 
+    # flow_population_post_grit_removal = ccf(nwss$`flow-population_post grit removal`,
+    #                                   nwss$total_admissions_all_covid_confirmed, lag.max = 5,
+    #                                   na.action = na.pass, plot = F)
+    # flow_population_raw_wastewater = ccf(nwss$`flow-population_raw wastewater`,
+    #                                nwss$total_admissions_all_covid_confirmed, lag.max = 5,
+    #                                na.action = na.pass, plot = F)
+    # flow_population_primary_sludge = ccf(nwss$`flow-population_primary sludge`,
+    #                                nwss$total_admissions_all_covid_confirmed, lag.max = 5,
+    #                                na.action = na.pass, plot = F)
+    # flow_population_primary_effluent = ccf(nwss$`flow-population_primary effluent`,
+    #                                  nwss$total_admissions_all_covid_confirmed, lag.max = 5,
+    #                                  na.action = na.pass, plot = F)
+
     avg_detect_prop_weighted_post_grit_removal = ccf(nwss$`avg_detect_prop_weighted_post grit removal`,
                                       nwss$total_admissions_all_covid_confirmed, lag.max = 5,
                                       na.action = na.pass, plot = F)
@@ -252,24 +252,24 @@ get_ccf <- function(df, state_nm){
                      "type" = 'Count Positive')) %>%
     bind_rows(tibble("acf" = ed_visit$acf, "lag" = ed_visit$lag,
                      "type" = 'ED Visit')) %>%
-    bind_rows(tibble("acf" = microbial_post_grit_removal$acf,
-                     "lag" = microbial_post_grit_removal$lag,
-                     "type" = 'Microbial Post-Grit Removal WW Detect')) %>%
+    # bind_rows(tibble("acf" = microbial_post_grit_removal$acf,
+    #                  "lag" = microbial_post_grit_removal$lag,
+    #                  "type" = 'Microbial Post-Grit Removal WW Detect')) %>%
     # bind_rows(tibble("acf" = microbial_raw_wastewater$acf,
     #                  "lag" = microbial_raw_wastewater$lag,
     #                  "type" = 'Microbial Raw WW Detect')) %>%
-    bind_rows(tibble("acf" = microbial_primary_sludge$acf,
-                     "lag" = microbial_primary_sludge$lag,
-                     "type" = 'Microbial Primary Sludge WW Detect')) %>%
+    # bind_rows(tibble("acf" = microbial_primary_sludge$acf,
+    #                  "lag" = microbial_primary_sludge$lag,
+    #                  "type" = 'Microbial Primary Sludge WW Detect')) %>%
     # bind_rows(tibble("acf" = microbial_primary_effluent$acf,
     #                  "lag" = microbial_primary_effluent$lag,
     #                  "type" = 'Microbial Primary Effluent WW Detect')) %>%
-    bind_rows(tibble("acf" = flow_population_post_grit_removal$acf,
-                     "lag" = flow_population_post_grit_removal$lag,
-                     "type" = 'Flow-Pop Post-Grit Removal WW Detect')) %>%
-    bind_rows(tibble("acf" = flow_population_raw_wastewater$acf,
-                     "lag" = flow_population_raw_wastewater$lag,
-                     "type" = 'Flow-Pop Raw WW Detect')) %>%
+    # bind_rows(tibble("acf" = flow_population_post_grit_removal$acf,
+    #                  "lag" = flow_population_post_grit_removal$lag,
+    #                  "type" = 'Flow-Pop Post-Grit Removal WW Detect')) %>%
+    # bind_rows(tibble("acf" = flow_population_raw_wastewater$acf,
+    #                  "lag" = flow_population_raw_wastewater$lag,
+    #                  "type" = 'Flow-Pop Raw WW Detect')) %>%
     # bind_rows(tibble("acf" = flow_population_primary_sludge$acf,
     #                  "lag" = flow_population_primary_sludge$lag,
     #                  "type" = 'Flow-Pop Primary Sludge WW Detect')) %>%
@@ -282,13 +282,13 @@ get_ccf <- function(df, state_nm){
     bind_rows(tibble("acf" = avg_detect_prop_unweighted_raw_wastewater$acf,
                      "lag" = avg_detect_prop_unweighted_raw_wastewater$lag,
                      "type" = 'Weighted WW Raw % Detect')) %>%
-    # bind_rows(tibble("acf" = avg_detect_prop_weighted_primary_sludge$acf,
-    #                  "lag" = avg_detect_prop_weighted_primary_sludge$lag,
-    #                  "type" = 'Weighted WW Primary Sludge % Detect')) %>%
+    bind_rows(tibble("acf" = avg_detect_prop_weighted_primary_sludge$acf,
+                     "lag" = avg_detect_prop_weighted_primary_sludge$lag,
+                     "type" = 'Weighted WW Primary Sludge % Detect')) %>%
     # bind_rows(tibble("acf" = avg_detect_prop_weighted_primary_effluent$acf,
     #                  "lag" = avg_detect_prop_weighted_primary_effluent$lag,
     #                  "type" = 'Weighted WW Primary Effluent % Detect')) %>%
-    
+    # 
     # bind_rows(tibble("acf" = avg_detect_prop_unweighted_post_grit_removal$acf,
     #                  "lag" = avg_detect_prop_unweighted_post_grit_removal$lag,
     #                  "type" = 'Unweighted WW Post-Grit Removal % Detect')) %>%
@@ -354,4 +354,3 @@ p <- ggplot(ccf_df, aes(x = state, y = type, fill = acf)) +
 ggsave(paste0("results/CCF Heatmap.pdf"),
        plot = p, width = 16, height = 10, units = "in", bg = "white", 
        dpi = "retina")
-
