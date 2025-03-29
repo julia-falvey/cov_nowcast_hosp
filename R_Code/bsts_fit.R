@@ -1,24 +1,8 @@
+# Load Packages -----------------------------------------------------------
 pacman::p_load(bsts, stats, tidyverse, scales, xtable)
-setwd("~/Desktop/git/cov_nowcast_hosp")
 
-hospitalizations_age <<- read.csv("https://data.cdc.gov/resource/aemt-mg7g.csv?$limit=500000") %>% 
-  dplyr::select(date = week_end_date, state = jurisdiction, weekly_actual_days_reporting_any_data, weekly_percent_days_reporting_any_data, 
-                total_admissions_all_covid_confirmed, total_admissions_adult_covid_confirmed, total_admissions_pediatric_covid_confirmed, 
-                avg_admissions_all_covid_confirmed, percent_adult_covid_admissions,
-                num_hospitals_admissions_all_covid_confirmed) %>%
-  mutate(date = as.Date(date), 
-         mmwr = MMWRweek::MMWRweek(date), 
-         mmwr_date = paste0(mmwr$MMWRyear, '-', if_else(nchar(mmwr$MMWRweek) == 1, 
-                                                        paste0("0", mmwr$MMWRweek), 
-                                                        as.character(mmwr$MMWRweek)))) %>%
-  filter(date <= "2024-05-01") # Filter out optional reporting period 
-
-max_date <- max(hospitalizations_age$date)
-prediction_horizons <- c(max_date %m-% months(3), max_date %m-% months(6), 
-                         max_date %m-% months(9), max_date %m-% months(12)) %>%
-  as.character()
-
-
+# Functions ---------------------------------------------------------------
+# Function to get fitted values from BSTS model
 get_yhats <- function(fit){
   burn <- SuggestBurn(0.2, fit)
   X     <- fit$state.contributions
@@ -43,6 +27,7 @@ get_yhats <- function(fit){
   return(predictions)
 }
 
+# Fit Univariate Model
 fit_bsts <- function(cut_date, data, state) {
   train_data <- data %>% filter(date < cut_date)
   n = n_distinct(data %>% filter(date >= cut_date) %>% pull(date))
@@ -84,46 +69,7 @@ fit_bsts <- function(cut_date, data, state) {
   return(train_data)
 }
 
-
-df_list <- tibble()
-for(state_nm in c(state.abb, "DC")){
-  print(state_nm)
-  data <- hospitalizations_age %>%
-    filter(state == state_nm) %>%
-    dplyr::select(date, hosp = total_admissions_all_covid_confirmed) %>%
-    # # use box-cox transform on hospital data to avoid negatives in predictions
-    # # we assume box-cox order 0 (so log() transform, but add 1 to avoid fitting
-    # # log(0) in our model)
-    mutate(hosp_transformed = log(hosp+1))
-  for(predict_cut in prediction_horizons){
-    df_list <- bind_rows(df_list, fit_bsts(predict_cut, data, state_nm))
-  }
-}
-
-write_rds(df_list, "bsts_data.rds")
-for(predict_cut in prediction_horizons){
-  p <- df_list %>%
-    filter(cut_date == predict_cut, 
-           date >= "2022-07-01") %>%
-    rename(`Fitted Period` = fitted, `Forecast Period` = `Point Forecast`) %>%
-    pivot_longer(`Fitted Period`:`Forecast Period`) %>%
-    drop_na() %>%
-    filter(cut_date == as.Date(predict_cut), 
-           date >= "2022-07-01") %>%
-    ggplot(aes(x = date)) + 
-    geom_line(aes(y = hosp, color = "Reported \nHospitalizations")) +
-    geom_point(aes(y = value, color = name), size = 0.5) + 
-    theme_minimal() + 
-    scale_color_manual(values = c("#1B9E77", "#7570B3", "#000000")) + 
-    labs(y = "Hospitalizations", x = "Date", color = "") +
-    facet_wrap(state ~ ., ncol =  4, scales = "free_y")
-  ggsave(paste0("results/BSTS Results for ", as.Date(predict_cut), ".pdf"), 
-         plot = p, width = 16, height = 10, units = "in", bg = "white", 
-         dpi = "retina")
-}
-
-# With Regressors ---------------------------------------------------------
-
+# Fit Multivariate Model
 fit_bsts_regressor <- function(cut_date, data, state, n_reg) {
   train_data <- data %>% filter(date < cut_date)
   new_data <- data %>% filter(date >= cut_date) %>% select(!date)
@@ -134,8 +80,8 @@ fit_bsts_regressor <- function(cut_date, data, state, n_reg) {
   ss <- AddSeasonal(ss, train_data$hosp_transformed, nseasons = 52, 
                     season.duration = 1)
   ss <- AddSemilocalLinearTrend(ss, train_data$hosp_transformed)
-
-    model1 <- bsts(hosp_transformed ~ .,
+  
+  model1 <- bsts(hosp_transformed ~ .,
                  state.specification = ss,
                  data = train_data %>% select(-date, -hosp),
                  # family = 'poisson',
@@ -170,10 +116,74 @@ fit_bsts_regressor <- function(cut_date, data, state, n_reg) {
   return(train_data)
 }
 
+# Pull in Hospitalization Data --------------------------------------------
+hospitalizations_age <<- read.csv("https://data.cdc.gov/resource/aemt-mg7g.csv?$limit=500000") %>% 
+  dplyr::select(date = week_end_date, state = jurisdiction, weekly_actual_days_reporting_any_data, weekly_percent_days_reporting_any_data, 
+                total_admissions_all_covid_confirmed, total_admissions_adult_covid_confirmed, total_admissions_pediatric_covid_confirmed, 
+                avg_admissions_all_covid_confirmed, percent_adult_covid_admissions,
+                num_hospitals_admissions_all_covid_confirmed) %>%
+  mutate(date = as.Date(date), 
+         mmwr = MMWRweek::MMWRweek(date), 
+         mmwr_date = paste0(mmwr$MMWRyear, '-', if_else(nchar(mmwr$MMWRweek) == 1, 
+                                                        paste0("0", mmwr$MMWRweek), 
+                                                        as.character(mmwr$MMWRweek)))) %>%
+  filter(date <= "2024-05-01") # Filter out optional reporting period 
 
+# Set Prediction Horizons -------------------------------------------------
+max_date <- max(hospitalizations_age$date)
+prediction_horizons <- c(max_date %m-% months(3), max_date %m-% months(6), 
+                         max_date %m-% months(9), max_date %m-% months(12)) %>%
+  as.character()
+
+
+
+
+# Univariate BSTS ---------------------------------------------------------
 df_list <- tibble()
+for(state_nm in c(state.abb, "DC")){
+  print(state_nm)
+  data <- hospitalizations_age %>%
+    filter(state == state_nm) %>%
+    dplyr::select(date, hosp = total_admissions_all_covid_confirmed) %>%
+    # # use box-cox transform on hospital data to avoid negatives in predictions
+    # # we assume box-cox order 0 (so log() transform, but add 1 to avoid fitting
+    # # log(0) in our model)
+    mutate(hosp_transformed = log(hosp+1))
+  for(predict_cut in prediction_horizons){
+    df_list <- bind_rows(df_list, fit_bsts(predict_cut, data, state_nm))
+  }
+}
+# Write outputs
+write_rds(df_list, "bsts_data.rds")
+# Plot
+for(predict_cut in prediction_horizons){
+  p <- df_list %>%
+    filter(cut_date == predict_cut, 
+           date >= "2022-07-01") %>%
+    rename(`Fitted Period` = fitted, `Forecast Period` = `Point Forecast`) %>%
+    pivot_longer(`Fitted Period`:`Forecast Period`) %>%
+    drop_na() %>%
+    filter(cut_date == as.Date(predict_cut), 
+           date >= "2022-07-01") %>%
+    ggplot(aes(x = date)) + 
+    geom_line(aes(y = hosp, color = "Reported \nHospitalizations")) +
+    geom_point(aes(y = value, color = name), size = 0.5) + 
+    theme_minimal() + 
+    scale_color_manual(values = c("#1B9E77", "#7570B3", "#000000")) + 
+    labs(y = "Hospitalizations", x = "Date", color = "") +
+    facet_wrap(state ~ ., ncol =  4, scales = "free_y")
+  ggsave(paste0("results/BSTS Results for ", as.Date(predict_cut), ".pdf"), 
+         plot = p, width = 16, height = 10, units = "in", bg = "white", 
+         dpi = "retina")
+}
+
+# Multivariate BSTS  ---------------------------------------------------------
+
 full_data <- read_csv('data/updated_joined_df.csv')
 ccf = read_csv('results/ccf.csv') 
+df_list <- tibble()
+
+# Fit each state
 for(state_nm in c(state.abb, "DC")){
   ccf_state = ccf %>%
     filter(state == state_nm)
@@ -269,9 +279,10 @@ for(state_nm in c(state.abb, "DC")){
   }
 }
 
-
+# Write out results
 write_rds(df_list, "results/Multivariate/bsts_final.rds")
 
+# Plot
 for(predict_cut in prediction_horizons){
   for(type in unique(df_list$model_type)){
     p <- df_list %>%
